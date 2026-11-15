@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<!--
+  ClipCutter - Video Analyser and Shorts Maker
+  ============================================
+  WHAT THIS FILE IS:
+    A complete website in ONE file (HTML = page layout, CSS = looks, JavaScript = brain).
+    Why one file? It is the easiest to put on GitHub Pages: just upload and it works.
+
+  WHY JAVASCRIPT?
+    JavaScript runs inside the browser, so the video never gets uploaded anywhere.
+    It is private, free, and needs no server.
+
+  HOW IT WORKS (big picture):
+    1. You pick a video file.
+    2. ANALYSE: the page listens to the sound (loud/excited parts) and watches the
+       picture (lots of movement / scene changes). Each second gets a score.
+    3. FIND CLIPS: it slides a window over the video and picks the highest-scoring,
+       non-overlapping parts. It nudges cut points to quiet moments so words are
+       not cut in half.
+    4. EXPORT: it plays the clip on a hidden video, draws each frame onto a canvas
+       (cropped to 9:16 for Shorts / Reels) and records it with MediaRecorder.
+
+  HOW TO IMPROVE LATER (ideas):
+    - Add speech-to-text (Whisper in the browser) so cuts happen at sentence ends.
+    - Use ffmpeg.wasm for faster, higher quality MP4 export.
+    - Add face detection so the 9:16 crop follows the speaker.
+    - Add burned-in captions and a title overlay.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClipCutter - Video to Shorts</title>
+
+<style>
+  /* ---------- COLOURS ----------
+     We save colours as variables (names) so we can change the whole theme in one place.
+     To improve: add a light theme by redefining these inside a media query. */
+  :root {
+    --bg: #0f1115;
+    --card: #181b22;
+    --line: #2a2f3a;
+    --text: #e8eaf0;
+    --muted: #8b93a7;
+    --accent: #ff4d6d;
+    --accent2: #4dabff;
+    --ok: #3ddc97;
+  }
+
+  /* Basic reset: make sizes predictable and set the page font. */
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.5;
+  }
+
+  header { padding: 28px 16px 8px; text-align: center; }
+  header h1 { margin: 0; font-size: 1.8rem; }
+  header h1 span { color: var(--accent); }
+  header p { margin: 6px 0 0; color: var(--muted); }
+
+  /* Page container: centred, with a max width so it reads well on big screens. */
+  main { max-width: 980px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+
+  /* A "card" is just a rounded box we reuse for every section. */
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+  .card h2 { margin: 0 0 10px; font-size: 1.05rem; }
+
+  /* Drag-and-drop area. */
+  #drop {
+    border: 2px dashed var(--line); border-radius: 12px; padding: 32px 16px;
+    text-align: center; color: var(--muted); cursor: pointer; transition: .2s;
+  }
+  #drop.over, #drop:hover { border-color: var(--accent); color: var(--text); }
+
+  video { width: 100%; max-height: 380px; background: #000; border-radius: 10px; }
+
+  /* Settings form laid out in a flexible grid. */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+  label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: 4px; }
+  select, input[type=number], input[type=range] {
+    width: 100%; padding: 8px; border-radius: 8px; border: 1px solid var(--line);
+    background: #0f1218; color: var(--text); font-size: .95rem;
+  }
+
+  button {
+    background: var(--accent); color: #fff; border: 0; padding: 10px 16px;
+    border-radius: 10px; font-weight: 600; cursor: pointer; font-size: .95rem;
+  }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button:hover:not(:disabled) { filter: brightness(1.1); }
+
+  /* Progress bar. */
+  .bar { height: 8px; background: var(--line); border-radius: 6px; overflow: hidden; margin-top: 8px; }
+  .bar > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .2s; }
+  #status { color: var(--muted); font-size: .9rem; margin-top: 8px; min-height: 1.3em; }
+
+  #timeline { width: 100%; height: 110px; border-radius: 10px; background: #0f1218; cursor: pointer; display: block; }
+
+  /* One result card per suggested clip. */
+  .clip { border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; }
+  .clip-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+  .badge { font-size: .75rem; padding: 2px 8px; border-radius: 99px; background: #232938; color: var(--muted); }
+  .badge.ok { color: var(--ok); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+  .row > div { flex: 1 1 110px; }
+  a.dl { color: var(--ok); font-weight: 600; }
+
+  /* This hidden video is only used while exporting. It must stay in the page
+     (not display:none) or some browsers stop drawing its frames. */
+  #exportVideo { position: fixed; width: 2px; height: 2px; opacity: .01; pointer-events: none; left: 0; top: 0; }
+
+  footer { text-align: center; color: var(--muted); font-size: .8rem; padding: 16px; }
+</style>
+</head>
+
+<body>
+<header>
+  <h1>Clip<span>Cutter</span></h1>
+  <p>Find the best moments in a video and turn them into Shorts, Reels or longer highlights. Everything runs in your browser.</p>
+</header>
+
+<main>
+
+  <!-- STEP 1: choose a video -->
+  <section class="card">
+    <h2>1. Choose your video</h2>
+    <div id="drop">Drop a video here or click to browse (MP4, MOV, WebM)</div>
+    <input id="fileInput" type="file" accept="video/*" hidden>
+  </section>
+
+  <!-- STEP 2: preview player (hidden until a video is loaded) -->
+  <section class="card" id="playerCard" hidden>
+    <h2>2. Preview</h2>
+    <video id="player" controls playsinline></video>
+    <p id="meta" style="color:var(--muted);margin:8px 0 0;font-size:.9rem"></p>
+  </section>
+
+  <!-- STEP 3: settings -->
+  <section class="card" id="settingsCard" hidden>
+    <h2>3. What do you want?</h2>
+    <div class="grid">
+      <div>
+        <label for="lenSel">Clip length</label>
+        <select id="lenSel">
+          <optgroup label="Shorts / Reels">
+            <option value="15">15 seconds</option>
+            <option value="30" selected>30 seconds</option>
+            <option value="45">45 seconds</option>
+            <option value="60">60 seconds</option>
+            <option value="90">90 seconds</option>
+          </optgroup>
+          <optgroup label="Longer highlights">
+            <option value="120">2 minutes</option>
+            <option value="180">3 minutes</option>
+            <option value="300">5 minutes</option>
+          </optgroup>
+        </select>
+      </div>
+      <div>
+        <label for="countSel">How many clips?</label>
+        <input id="countSel" type="number" min="1" max="10" value="5">
+      </div>
+      <div>
+        <label for="focusSel">What counts as "best"?</label>
+        <select id="focusSel">
+          <option value="0.6">Balanced (sound + action)</option>
+          <option value="0.85">Mostly sound (talks, music, reactions)</option>
+          <option value="0.25">Mostly action (sports, gameplay, vlogs)</option>
+        </select>
+      </div>
+    </div>
+    <div style="margin-top:14px">
+      <button id="analyseBtn">Analyse video</button>
+    </div>
+    <div class="bar"><div id="bar"></div></div>
+    <div id="status"></div>
+  </section>
+
+  <!-- STEP 4: timeline graph + suggested clips -->
+  <section class="card" id="resultsCard" hidden>
+    <h2>4. Interest map (click to jump)</h2>
+    <canvas id="timeline"></canvas>
+
+    <h2 style="margin-top:18px">5. Suggested clips</h2>
+    <div class="grid" style="margin-bottom:12px">
+      <div>
+        <label for="modeSel">Export shape</label>
+        <select id="modeSel">
+          <option value="crop">Vertical 9:16 (crop to fill)</option>
+          <option value="blur">Vertical 9:16 (full video + blurred bars)</option>
+          <option value="original">Keep original shape</option>
+        </select>
+      </div>
+      <div>
+        <label for="posSlider">Crop position (left to right)</label>
+        <input id="posSlider" type="range" min="0" max="100" value="50">
+      </div>
+    </div>
+    <div id="clipList" style="display:grid;gap:10px"></div>
+    <p style="color:var(--muted);font-size:.8rem;margin-bottom:0">
+      Tip: exporting plays the clip in real time, so a 30 second clip takes about 30 seconds.
+      Keep this tab open and visible while it works.
+    </p>
+  </section>
+
+</main>
+
+<footer>Made for creators. Platform rules change, so check current YouTube and Instagram limits before uploading.</footer>
+
+<!-- Hidden video used only for exporting. -->
+<video id="exportVideo" playsinline></video>
+
+<script>
+/* =====================================================================
+   JAVASCRIPT STARTS HERE
+   ===================================================================== */
+
+/* ---------- 1. SHORTCUTS ----------
+   $ is a tiny helper so we can write $("id") instead of document.getElementById("id"). */
+const $ = (id) => document.getElementById(id);
+
+/* ---------- 2. APP STATE ----------
+   One object that remembers everything about the current video.
+   Keeping it in one place makes bugs easier to find. */
+const state = {
+  file: null,       // the File the user picked
+  url: null,        // a temporary link to that file that <video> can play
+  duration: 0,      // video length in seconds
+  fine: [],         // sound loudness, 4 values per second (used to find quiet cut points)
+  audioPerSec: [],  // sound score 0..1 for each second
+  motionPerSec: [], // movement score 0..1 for each second
+  score: [],        // final combined score 0..1 for each second
+  clips: []         // suggested clips: {start, end, score, reason, downloadUrl}
+};
+
+const FINE_RES = 4; // how many loudness samples we take per second
+
+/* ---------- 3. SMALL HELPERS ---------- */
+
+// Turn seconds into m:ss so humans can read it.
+function fmt(sec) {
+  sec = Math.max(0, sec);
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return m + ":" + String(s).padStart(2, "0");
+}
+
+// Show text under the progress bar and move the bar (0 to 1).
+function setStatus(text, progress) {
+  $("status").textContent = text;
+  if (progress !== undefined) $("bar").style.width = Math.round(progress * 100) + "%";
+}
+
+// Stop HTML tricks: turn special characters into safe text (used for file names).
+function esc(t) {
+  return String(t).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Scale an array so values sit between 0 and 1.
+// We use the 95th percentile as "max" so one huge spike doesn't squash everything else.
+function normalise(arr) {
+  if (!arr.length) return arr;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const top = sorted[Math.floor(sorted.length * 0.95)] || sorted[sorted.length - 1] || 1;
+  return arr.map((v) => Math.min(1, v / (top || 1)));
+}
+
+// Smooth an array by averaging neighbours (stops one-second flickers from winning).
+function smooth(arr, radius) {
+  return arr.map((_, i) => {
+    let sum = 0, n = 0;
+    for (let k = i - radius; k <= i + radius; k++) {
+      if (k >= 0 && k < arr.length) { sum += arr[k]; n++; }
+    }
+    return sum / n;
+  });
+}
+
+// Wait until a video finishes jumping to a new time (with a safety timeout).
+function seekTo(video, t) {
+  return new Promise((resolve) => {
+    const done = () => { video.removeEventListener("seeked", done); resolve(); };
+    video.addEventListener("seeked", done);
+    video.currentTime = t;
+    setTimeout(done, 3000); // never wait forever
+  });
+}
+
+/* ---------- 4. LOADING A VIDEO ---------- */
+
+const drop = $("drop");
+const fileInput = $("fileInput");
+
+drop.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => fileInput.files[0] && loadFile(fileInput.files[0]));
+
+// Drag and drop support.
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => {
+  e.preventDefault();
+  drop.classList.remove("over");
+  if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+});
+
+function loadFile(file) {
+  if (!file.type.startsWith("video/")) { alert("Please choose a video file."); return; }
+
+  // Free the memory of any earlier video.
+  if (state.url) URL.revokeObjectURL(state.url);
+
+  state.file = file;
+  state.url = URL.createObjectURL(file); // a temporary local link, nothing is uploaded
+  state.clips = [];
+
+  const player = $("player");
+  player.src = state.url;
+  player.onloadedmetadata = () => {
+    state.duration = player.duration;
+    $("meta").textContent = file.name + "  |  " + fmt(state.duration) + "  |  " +
+      player.videoWidth + "x" + player.videoHeight;
+    $("playerCard").hidden = false;
+    $("settingsCard").hidden = false;
+    $("resultsCard").hidden = true;
+    setStatus("Ready. Press Analyse video.", 0);
+  };
+}
+
+/* ---------- 5. ANALYSIS PART A: SOUND ----------
+   We decode the audio into numbers, then measure loudness (RMS) for each slice.
+   Loud, lively moments usually mean excitement, laughs, key points or music hits. */
+async function analyseAudio(file) {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ac = new Ctx();
+  try {
+    const bytes = await file.arrayBuffer();
+    const audio = await ac.decodeAudioData(bytes);
+    const data = audio.getChannelData(0);   // first audio channel
+    const sr = audio.sampleRate;            // samples per second
+    const slice = Math.floor(sr / FINE_RES);
+    const count = Math.ceil(audio.duration * FINE_RES);
+    const fine = new Array(count).fill(0);
+
+    for (let i = 0; i < count; i++) {
+      const start = i * slice;
+      const end = Math.min(start + slice, data.length);
+      let sum = 0, n = 0;
+      // Skip samples (step 8) to keep this fast. It is still accurate enough.
+      for (let k = start; k < end; k += 8) { sum += data[k] * data[k]; n++; }
+      fine[i] = n ? Math.sqrt(sum / n) : 0;
+    }
+    return fine;
+  } finally {
+    ac.close();
+  }
+}
+
+/* ---------- 6. ANALYSIS PART B: MOTION / SCENE CHANGES ----------
+   We jump through the video, shrink each frame to a tiny 64x36 picture and see how
+   much it differs from the previous one. Big differences = movement or a cut. */
+async function analyseMotion(url, duration) {
+  const v = document.createElement("video");
+  v.muted = true;
+  v.src = url;
+  await new Promise((res) => { v.onloadeddata = res; });
+
+  const W = 64, H = 36;
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const g = c.getContext("2d", { willReadFrequently: true });
+
+  // For long videos we sample less often so analysis stays reasonably quick (max ~300 samples).
+  const step = Math.max(1, Math.ceil(duration / 300));
+  const values = [];
+  let prev = null;
+
+  for (let t = 0; t < duration; t += step) {
+    await seekTo(v, t);
+    g.drawImage(v, 0, 0, W, H);
+    const px = g.getImageData(0, 0, W, H).data;
+    let diff = 0;
+    if (prev) {
+      for (let i = 0; i < px.length; i += 4) diff += Math.abs(px[i] - prev[i]); // compare the red channel only (fast)
+    }
+    values.push(diff);
+    prev = px;
+    setStatus("Watching the picture... " + fmt(t) + " / " + fmt(duration), 0.35 + 0.55 * (t / duration));
+  }
+
+  // Spread the sparse samples out so we have one value for every second.
+  const perSec = [];
+  for (let s = 0; s < Math.ceil(duration); s++) {
+    perSec.push(values[Math.min(values.length - 1, Math.floor(s / step))] || 0);
+  }
+  return perSec;
+}
+
+/* ---------- 7. THE MAIN ANALYSE BUTTON ---------- */
+$("analyseBtn").addEventListener("click", async () => {
+  const btn = $("analyseBtn");
+  btn.disabled = true;
+  try {
+    const secs = Math.ceil(state.duration);
+
+    // --- sound ---
+    setStatus("Listening to the sound...", 0.05);
+    let audioOk = true;
+    try {
+      state.fine = await analyseAudio(state.file);
+    } catch (err) {
+      // Very large files or odd formats may not decode. We then rely on motion only.
+      console.warn("Audio analysis failed:", err);
+      audioOk = false;
+      state.fine = new Array(secs * FINE_RES).fill(0);
+    }
+    // Average the fine samples into one number per second.
+    const audioRaw = [];
+    for (let s = 0; s < secs; s++) {
+      let sum = 0;
+      for (let k = 0; k < FINE_RES; k++) sum += state.fine[s * FINE_RES + k] || 0;
+      audioRaw.push(sum / FINE_RES);
+    }
+    state.audioPerSec = normalise(audioRaw);
+
+    // --- picture ---
+    setStatus("Watching the picture...", 0.35);
+    state.motionPerSec = normalise(await analyseMotion(state.url, state.duration));
+
+    // --- combine ---
+    // "weight" says how much we trust sound vs motion (from the dropdown).
+    let weight = parseFloat($("focusSel").value);
+    if (!audioOk) weight = 0; // no sound available, so use motion only
+    const combined = state.audioPerSec.map((a, i) => weight * a + (1 - weight) * (state.motionPerSec[i] || 0));
+    state.score = smooth(combined, 2); // smooth so single spikes don't dominate
+
+    // --- pick clips ---
+    setStatus("Choosing the best moments...", 0.95);
+    state.clips = findClips(parseInt($("lenSel").value, 10), parseInt($("countSel").value, 10));
+
+    renderResults();
+    setStatus(audioOk ? "Done! Scroll down for your clips." : "Done (no readable audio, so only motion was used).", 1);
+  } catch (err) {
+    console.error(err);
+    setStatus("Something went wrong: " + err.message, 0);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+/* ---------- 8. PICKING THE BEST CLIPS ----------
+   Idea: slide a window of the wanted length across the video, average the score inside it,
+   then take the best windows that do not overlap each other. */
+function findClips(length, count) {
+  const secs = state.score.length;
+  length = Math.min(length, secs);              // clip cannot be longer than the video
+  const prefix = [0];                           // running totals make window averages instant
+  state.score.forEach((v, i) => prefix.push(prefix[i] + v));
+
+  // Score every possible start second.
+  const windows = [];
+  for (let start = 0; start + length <= secs; start++) {
+    windows.push({ start, mean: (prefix[start + length] - prefix[start]) / length });
+  }
+  windows.sort((a, b) => b.mean - a.mean);      // best first
+
+  const chosen = [];
+  for (const w of windows) {
+    if (chosen.length >= count) break;
+    // Reject windows that overlap with ones we already picked.
+    const overlaps = chosen.some((c) => w.start < c.rawStart + length && w.start + length > c.rawStart);
+    if (!overlaps) chosen.push({ rawStart: w.start, mean: w.mean });
+  }
+
+  // Turn each window into a final clip, snapping cut points to quiet moments.
+  return chosen.map((c) => {
+    let start = snapToQuiet(c.rawStart, 2);
+    let end = snapToQuiet(c.rawStart + length, 2);
+    if (end - start < length * 0.7) { start = c.rawStart; end = c.rawStart + length; } // safety fallback
+    end = Math.min(end, state.duration);
+
+    // Explain WHY we chose it (average sound vs average motion inside the clip).
+    const a = avg(state.audioPerSec, c.rawStart, c.rawStart + length);
+    const m = avg(state.motionPerSec, c.rawStart, c.rawStart + length);
+    let reason = "Strong overall energy";
+    if (a > m * 1.3) reason = "Loud / lively audio";
+    else if (m > a * 1.3) reason = "Lots of visual action";
+
+    return { start, end, score: c.mean, reason, downloadUrl: null };
+  });
+}
+
+// Average of arr between two seconds.
+function avg(arr, from, to) {
+  let sum = 0, n = 0;
+  for (let i = Math.floor(from); i < Math.min(to, arr.length); i++) { sum += arr[i]; n++; }
+  return n ? sum / n : 0;
+}
+
+// Look +/- "range" seconds around a time and return the quietest spot.
+// Cutting in silence avoids chopping a word in half.
+function snapToQuiet(time, range) {
+  const centre = Math.round(time * FINE_RES);
+  const lo = Math.max(0, centre - range * FINE_RES);
+  const hi = Math.min(state.fine.length - 1, centre + range * FINE_RES);
+  let best = centre, bestVal = Infinity;
+  for (let i = lo; i <= hi; i++) {
+    if (state.fine[i] < bestVal) { bestVal = state.fine[i]; best = i; }
+  }
+  return Math.min(state.duration, Math.max(0, best / FINE_RES));
+}
+
+/* ---------- 9. DRAWING THE TIMELINE ---------- */
+function drawTimeline() {
+  const c = $("timeline");
+  // Make the canvas sharp on high-resolution screens.
+  const dpr = window.devicePixelRatio || 1;
+  c.width = c.clientWidth * dpr;
+  c.height = c.clientHeight * dpr;
+  const g = c.getContext("2d");
+  g.scale(dpr, dpr);
+  const W = c.clientWidth, H = c.clientHeight;
+  g.clearRect(0, 0, W, H);
+
+  const n = state.score.length;
+  if (!n) return;
+
+  // Filled graph of the score.
+  g.beginPath();
+  g.moveTo(0, H);
+  for (let i = 0; i < n; i++) g.lineTo((i / n) * W, H - state.score[i] * (H - 14) - 2);
+  g.lineTo(W, H);
+  g.closePath();
+  g.fillStyle = "rgba(77,171,255,.35)";
+  g.fill();
+
+  // Highlight each suggested clip and number it.
+  state.clips.forEach((clip, i) => {
+    const x1 = (clip.start / state.duration) * W;
+    const x2 = (clip.end / state.duration) * W;
+    g.fillStyle = "rgba(255,77,109,.30)";
+    g.fillRect(x1, 0, Math.max(2, x2 - x1), H);
+    g.fillStyle = "#fff";
+    g.font = "12px system-ui";
+    g.fillText("#" + (i + 1), x1 + 4, 14);
+  });
+}
+
+// Clicking the timeline jumps the player to that time.
+$("timeline").addEventListener("click", (e) => {
+  const rect = e.target.getBoundingClientRect();
+  $("player").currentTime = ((e.clientX - rect.left) / rect.width) * state.duration;
+});
+window.addEventListener("resize", () => { if (state.score.length) drawTimeline(); });
+
+/* ---------- 10. SHOWING THE CLIP CARDS ---------- */
+function renderResults() {
+  $("resultsCard").hidden = false;
+  drawTimeline();
+
+  const list = $("clipList");
+  list.innerHTML = "";
+
+  state.clips.forEach((clip, i) => {
+    const dur = clip.end - clip.start;
+    const el = document.createElement("div");
+    el.className = "clip";
+    el.innerHTML = `
+      <div class="clip-head">
+        <strong>Clip #${i + 1}  <span style="color:var(--muted);font-weight:400">${fmt(clip.start)} - ${fmt(clip.end)}</span></strong>
+        <span>
+          <span class="badge">${esc(clip.reason)}</span>
+          <span class="badge">Score ${Math.round(clip.score * 100)}%</span>
+          <span class="badge ok" data-role="fit"></span>
+        </span>
+      </div>
+      <div class="row">
+        <div><label>Start (seconds)</label><input type="number" step="0.1" min="0" data-role="start" value="${clip.start.toFixed(1)}"></div>
+        <div><label>End (seconds)</label><input type="number" step="0.1" min="0" data-role="end" value="${clip.end.toFixed(1)}"></div>
+        <button class="ghost" data-role="setStart">Start = player time</button>
+        <button class="ghost" data-role="setEnd">End = player time</button>
+      </div>
+      <div class="row">
+        <button class="ghost" data-role="preview">Preview</button>
+        <button data-role="export">Export clip</button>
+        <div data-role="result" style="flex:3"></div>
+      </div>
+      <div class="bar"><div data-role="bar"></div></div>
+    `;
+    list.appendChild(el);
+
+    // Small helper: find an element inside THIS card.
+    const q = (role) => el.querySelector(`[data-role="${role}"]`);
+
+    // Show whether the length suits each platform (a friendly hint, not a rule).
+    function updateFit() {
+      const d = clip.end - clip.start;
+      const tags = [];
+      if (d <= 60) tags.push("Shorts");
+      if (d <= 90) tags.push("Reels");
+      q("fit").textContent = tags.length ? "Fits " + tags.join(" + ") + " (" + Math.round(d) + "s)" : Math.round(d) + "s";
+    }
+    updateFit();
+
+    // When the user edits the numbers, update the clip.
+    q("start").addEventListener("change", () => { clip.start = parseFloat(q("start").value) || 0; updateFit(); drawTimeline(); });
+    q("end").addEventListener("change", () => { clip.end = parseFloat(q("end").value) || clip.end; updateFit(); drawTimeline(); });
+
+    // Copy the main player's time into start/end.
+    q("setStart").addEventListener("click", () => { clip.start = $("player").currentTime; q("start").value = clip.start.toFixed(1); updateFit(); drawTimeline(); });
+    q("setEnd").addEventListener("click", () => { clip.end = $("player").currentTime; q("end").value = clip.end.toFixed(1); updateFit(); drawTimeline(); });
+
+    q("preview").addEventListener("click", () => previewClip(clip));
+    q("export").addEventListener("click", () => exportClip(clip, q("export"), q("bar"), q("result")));
+  });
+}
+
+/* ---------- 11. PREVIEW ---------- */
+let previewTimer = null;
+function previewClip(clip) {
+  const p = $("player");
+  p.currentTime = clip.start;
+  p.play();
+  clearInterval(previewTimer);
+  // Check every 100 ms and stop when we reach the clip end.
+  previewTimer = setInterval(() => {
+    if (p.currentTime >= clip.end || p.paused) { p.pause(); clearInterval(previewTimer); }
+  }, 100);
+  p.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+/* ---------- 12. EXPORT ----------
+   Browsers cannot "cut" a video file directly, so we do the clever trick:
+     - play the wanted part on a hidden video
+     - copy every frame to a canvas (this is where we crop to 9:16)
+     - record the canvas + the audio with MediaRecorder
+   Downside: it runs in real time. Upgrade path: ffmpeg.wasm. */
+async function exportClip(clip, button, barEl, resultEl) {
+  if (!window.MediaRecorder) { alert("Your browser cannot record video. Try Chrome, Edge or Firefox on a computer."); return; }
+  if (clip.end <= clip.start) { alert("End must be after start."); return; }
+
+  button.disabled = true;
+  resultEl.textContent = "Exporting... keep this tab open.";
+  barEl.style.width = "0%";
+
+  const mode = $("modeSel").value;                   // crop, blur or original
+  const pos = parseInt($("posSlider").value, 10) / 100; // 0 = left, 1 = right
+
+  const ev = $("exportVideo");
+  ev.src = state.url;
+  await new Promise((res) => { ev.onloadeddata = res; });
+
+  // ----- decide the output size -----
+  let W, H;
+  if (mode === "original") {
+    const scale = Math.min(1, 1280 / Math.max(ev.videoWidth, ev.videoHeight)); // do not upscale, cap at 1280
+    W = Math.round(ev.videoWidth * scale);
+    H = Math.round(ev.videoHeight * scale);
+  } else {
+    W = 720; H = 1280; // 9:16 vertical
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = W; canvas.height = H;
+  const g = canvas.getContext("2d");
+
+  // ----- connect the sound to the recorder (not to the speakers) -----
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ac = new Ctx();
+  await ac.resume();
+  const src = ac.createMediaElementSource(ev);
+  const dest = ac.createMediaStreamDestination();
+  src.connect(dest);
+
+  // ----- combine picture + sound into one stream -----
+  const stream = new MediaStream([
+    ...canvas.captureStream(30).getVideoTracks(),
+    ...dest.stream.getAudioTracks()
+  ]);
+
+  // Pick the best format this browser can record (MP4 is best for Instagram).
+  const types = ["video/mp4;codecs=avc1,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
+  const mime = types.find((t) => MediaRecorder.isTypeSupported(t)) || "";
+  const ext = mime.includes("mp4") ? "mp4" : "webm";
+
+  const chunks = [];
+  const rec = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: 6000000 });
+  rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+
+  // Draw the current video frame onto the canvas, using the chosen shape.
+  function draw() {
+    const vw = ev.videoWidth, vh = ev.videoHeight;
+    g.fillStyle = "#000";
+    g.fillRect(0, 0, W, H);
+
+    if (mode === "original") {
+      g.drawImage(ev, 0, 0, W, H);
+
+    } else if (mode === "crop") {
+      // "cover": scale up until the canvas is completely filled, then slide left/right.
+      const s = Math.max(W / vw, H / vh);
+      const dw = vw * s, dh = vh * s;
+      g.drawImage(ev, (W - dw) * pos, (H - dh) / 2, dw, dh);
+
+    } else {
+      // "blur": first a blurred, zoomed copy as the background...
+      const sCover = Math.max(W / vw, H / vh);
+      g.filter = "blur(28px) brightness(.7)";
+      g.drawImage(ev, (W - vw * sCover) / 2, (H - vh * sCover) / 2, vw * sCover, vh * sCover);
+      g.filter = "none";
+      // ...then the whole video sharp, in the middle.
+      const sFit = Math.min(W / vw, H / vh);
+      g.drawImage(ev, (W - vw * sFit) / 2, (H - vh * sFit) / 2, vw * sFit, vh * sFit);
+    }
+  }
+
+  // Jump to the start, then record while playing.
+  await seekTo(ev, clip.start);
+  rec.start(250);
+  await ev.play();
+
+  const total = clip.end - clip.start;
+  await new Promise((resolve) => {
+    function loop() {
+      draw();
+      const done = ev.currentTime - clip.start;
+      barEl.style.width = Math.min(100, (done / total) * 100) + "%";
+      if (ev.currentTime >= clip.end || ev.ended) { resolve(); return; }
+      requestAnimationFrame(loop);
+    }
+    loop();
+  });
+
+  // Stop everything and wait for the recorder to finish writing.
+  ev.pause();
+  await new Promise((res) => { rec.onstop = res; rec.stop(); });
+  ac.close();
+
+  // Build the downloadable file.
+  const blob = new Blob(chunks, { type: mime || "video/webm" });
+  if (clip.downloadUrl) URL.revokeObjectURL(clip.downloadUrl);
+  clip.downloadUrl = URL.createObjectURL(blob);
+
+  const name = "clip_" + fmt(clip.start).replace(":", "m") + "s." + ext;
+  resultEl.innerHTML = `<a class="dl" href="${clip.downloadUrl}" download="${esc(name)}">Download ${esc(name)} (${(blob.size / 1048576).toFixed(1)} MB)</a>` +
+    (ext === "webm" ? `<div style="color:var(--muted);font-size:.8rem">WebM file. If Instagram rejects it, convert it to MP4 (e.g. with HandBrake or CloudConvert) or use Chrome, which can save MP4 directly.</div>` : "");
+  barEl.style.width = "100%";
+  button.disabled = false;
+}
+</script>
+</body>
+</html>
