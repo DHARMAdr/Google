@@ -1,30 +1,37 @@
 <!DOCTYPE html>
 <!--
-  ClipCutter - Video Analyser and Shorts Maker
-  ============================================
+  ClipCutter v2 - Video Analyser, Trimmer and Shorts Maker
+  =========================================================
   WHAT THIS FILE IS:
-    A complete website in ONE file (HTML = page layout, CSS = looks, JavaScript = brain).
-    Why one file? It is the easiest to put on GitHub Pages: just upload and it works.
+    A complete website in ONE file: HTML (page layout), CSS (looks), JavaScript (brain).
+    One file = easiest to host on GitHub Pages.
 
   WHY JAVASCRIPT?
-    JavaScript runs inside the browser, so the video never gets uploaded anywhere.
+    It runs inside the browser, so your videos are never uploaded anywhere.
     It is private, free, and needs no server.
 
-  HOW IT WORKS (big picture):
-    1. You pick a video file.
-    2. ANALYSE: the page listens to the sound (loud/excited parts) and watches the
-       picture (lots of movement / scene changes). Each second gets a score.
-    3. FIND CLIPS: it slides a window over the video and picks the highest-scoring,
-       non-overlapping parts. It nudges cut points to quiet moments so words are
-       not cut in half.
-    4. EXPORT: it plays the clip on a hidden video, draws each frame onto a canvas
-       (cropped to 9:16 for Shorts / Reels) and records it with MediaRecorder.
+  WHAT'S NEW IN v2:
+    - Video LIBRARY: add many videos, switch between them, delete any of them.
+    - Manual TRIMMER: drag the green handles on the timeline, set In/Out, nudge,
+      split a clip at the playhead, duplicate, delete.
+    - More export options: shape (9:16, 4:5, 1:1, 16:9, original), quality,
+      speed, fade in/out, mute, title text, crop position.
+    - Export ALL clips in one go, cancel button, delete exported files.
+    - Clear error messages when something fails.
 
-  HOW TO IMPROVE LATER (ideas):
-    - Add speech-to-text (Whisper in the browser) so cuts happen at sentence ends.
-    - Use ffmpeg.wasm for faster, higher quality MP4 export.
-    - Add face detection so the 9:16 crop follows the speaker.
-    - Add burned-in captions and a title overlay.
+  BIG PICTURE OF HOW IT WORKS:
+    1. ANALYSE: listen to the sound and watch the picture, give every second a score.
+    2. SUGGEST: slide a window over the video and pick the best non-overlapping parts.
+       Cut points are nudged to quiet moments so words are not chopped.
+    3. TRIM: you can fine-tune any clip, or make your own clips by hand.
+    4. EXPORT: play the clip on a hidden video, draw each frame on a canvas (cropped
+       to the chosen shape) and record it with MediaRecorder.
+
+  HOW TO IMPROVE LATER:
+    - Speech-to-text (Whisper in the browser) so cuts land on sentence ends.
+    - ffmpeg.wasm for faster, higher quality MP4 export (no real-time recording).
+    - Face detection so the crop follows the speaker.
+    - Merge several clips into one video.
 -->
 <html lang="en">
 <head>
@@ -34,8 +41,7 @@
 
 <style>
   /* ---------- COLOURS ----------
-     We save colours as variables (names) so we can change the whole theme in one place.
-     To improve: add a light theme by redefining these inside a media query. */
+     Saved as variables so the whole theme can be changed in one place. */
   :root {
     --bg: #0f1115;
     --card: #181b22;
@@ -45,16 +51,14 @@
     --accent: #ff4d6d;
     --accent2: #4dabff;
     --ok: #3ddc97;
+    --warn: #ffb84d;
   }
 
-  /* Basic reset: make sizes predictable and set the page font. */
+  /* Reset: make sizes predictable and choose the page font. */
   * { box-sizing: border-box; }
   body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    line-height: 1.5;
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; line-height: 1.5;
   }
 
   header { padding: 28px 16px 8px; text-align: center; }
@@ -62,55 +66,72 @@
   header h1 span { color: var(--accent); }
   header p { margin: 6px 0 0; color: var(--muted); }
 
-  /* Page container: centred, with a max width so it reads well on big screens. */
-  main { max-width: 980px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+  main { max-width: 1000px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
 
-  /* A "card" is just a rounded box we reuse for every section. */
+  /* A "card" is a rounded box reused for every section. */
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
   .card h2 { margin: 0 0 10px; font-size: 1.05rem; }
+  .card h3 { margin: 14px 0 8px; font-size: .95rem; color: var(--muted); font-weight: 600; }
+  [hidden] { display: none !important; }
 
   /* Drag-and-drop area. */
   #drop {
-    border: 2px dashed var(--line); border-radius: 12px; padding: 32px 16px;
+    border: 2px dashed var(--line); border-radius: 12px; padding: 26px 16px;
     text-align: center; color: var(--muted); cursor: pointer; transition: .2s;
   }
   #drop.over, #drop:hover { border-color: var(--accent); color: var(--text); }
 
+  /* Video library list. */
+  .lib-item {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between;
+    border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin-top: 8px;
+  }
+  .lib-item.active { border-color: var(--accent2); background: #1b2230; }
+  .lib-item .name { font-weight: 600; word-break: break-all; }
+  .lib-item .sub { color: var(--muted); font-size: .8rem; }
+
   video { width: 100%; max-height: 380px; background: #000; border-radius: 10px; }
 
-  /* Settings form laid out in a flexible grid. */
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
-  label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: 4px; }
-  select, input[type=number], input[type=range] {
+  /* Settings laid out in a flexible grid. */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  label { display: block; font-size: .82rem; color: var(--muted); margin-bottom: 4px; }
+  select, input[type=number], input[type=text], input[type=range] {
     width: 100%; padding: 8px; border-radius: 8px; border: 1px solid var(--line);
     background: #0f1218; color: var(--text); font-size: .95rem;
   }
+  .check { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: .9rem; margin: 0; padding-top: 22px; }
+  .check input { width: auto; }
 
   button {
-    background: var(--accent); color: #fff; border: 0; padding: 10px 16px;
-    border-radius: 10px; font-weight: 600; cursor: pointer; font-size: .95rem;
+    background: var(--accent); color: #fff; border: 0; padding: 9px 14px;
+    border-radius: 10px; font-weight: 600; cursor: pointer; font-size: .9rem;
   }
   button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
-  button:disabled { opacity: .5; cursor: not-allowed; }
-  button:hover:not(:disabled) { filter: brightness(1.1); }
+  button.danger { background: transparent; border: 1px solid #5a2a35; color: #ff8aa0; }
+  button.small { padding: 5px 9px; font-size: .8rem; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button:hover:not(:disabled) { filter: brightness(1.15); }
 
-  /* Progress bar. */
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+  .row > .grow { flex: 1 1 110px; }
+
   .bar { height: 8px; background: var(--line); border-radius: 6px; overflow: hidden; margin-top: 8px; }
   .bar > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .2s; }
   #status { color: var(--muted); font-size: .9rem; margin-top: 8px; min-height: 1.3em; }
+  #status.err { color: #ff8aa0; }
 
-  #timeline { width: 100%; height: 110px; border-radius: 10px; background: #0f1218; cursor: pointer; display: block; }
+  /* The timeline canvas: graph + clips + draggable In/Out handles. */
+  #timeline { width: 100%; height: 120px; border-radius: 10px; background: #0f1218; cursor: pointer; display: block; touch-action: none; }
 
-  /* One result card per suggested clip. */
   .clip { border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; }
   .clip-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
-  .badge { font-size: .75rem; padding: 2px 8px; border-radius: 99px; background: #232938; color: var(--muted); }
+  .badge { font-size: .72rem; padding: 2px 8px; border-radius: 99px; background: #232938; color: var(--muted); white-space: nowrap; }
   .badge.ok { color: var(--ok); }
-  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
-  .row > div { flex: 1 1 110px; }
   a.dl { color: var(--ok); font-weight: 600; }
+  .muted { color: var(--muted); }
+  .hint { color: var(--muted); font-size: .8rem; margin: 8px 0 0; }
 
-  /* This hidden video is only used while exporting. It must stay in the page
+  /* Hidden video used only while exporting. It must stay in the page
      (not display:none) or some browsers stop drawing its frames. */
   #exportVideo { position: fixed; width: 2px; height: 2px; opacity: .01; pointer-events: none; left: 0; top: 0; }
 
@@ -121,28 +142,56 @@
 <body>
 <header>
   <h1>Clip<span>Cutter</span></h1>
-  <p>Find the best moments in a video and turn them into Shorts, Reels or longer highlights. Everything runs in your browser.</p>
+  <p>Find the best moments in your videos, trim them your way and export Shorts, Reels or longer highlights. Everything runs in your browser.</p>
 </header>
 
 <main>
 
-  <!-- STEP 1: choose a video -->
+  <!-- ============ 1. VIDEO LIBRARY (upload + delete) ============ -->
   <section class="card">
-    <h2>1. Choose your video</h2>
-    <div id="drop">Drop a video here or click to browse (MP4, MOV, WebM)</div>
-    <input id="fileInput" type="file" accept="video/*" hidden>
+    <h2>1. Your videos</h2>
+    <div id="drop">Drop videos here or click to add (MP4 / WebM / MOV). You can add several.</div>
+    <input id="fileInput" type="file" accept="video/*,.mp4,.mov,.m4v,.webm,.mkv" multiple hidden>
+    <div id="libList"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="danger small" id="deleteAllBtn" hidden>Delete all videos</button>
+    </div>
+    <div id="status"></div>
+    <div class="bar"><div id="bar"></div></div>
   </section>
 
-  <!-- STEP 2: preview player (hidden until a video is loaded) -->
+  <!-- ============ 2. PLAYER + MANUAL TRIMMER ============ -->
   <section class="card" id="playerCard" hidden>
-    <h2>2. Preview</h2>
+    <h2>2. Preview and trim by hand</h2>
     <video id="player" controls playsinline></video>
-    <p id="meta" style="color:var(--muted);margin:8px 0 0;font-size:.9rem"></p>
+    <p id="meta" class="muted" style="margin:8px 0 10px;font-size:.9rem"></p>
+
+    <canvas id="timeline"></canvas>
+    <p class="hint">Click the timeline to jump. Drag the <b style="color:var(--ok)">green handles</b> to choose In and Out. Keys: <b>I</b> = set In, <b>O</b> = set Out, arrows = seek (Shift = fine).</p>
+
+    <div class="row" style="margin-top:10px">
+      <div class="grow"><label for="inT">In (seconds)</label><input id="inT" type="number" min="0" step="0.1" value="0"></div>
+      <div class="grow"><label for="outT">Out (seconds)</label><input id="outT" type="number" min="0" step="0.1" value="30"></div>
+      <button class="ghost" id="setIn">In = playhead</button>
+      <button class="ghost" id="setOut">Out = playhead</button>
+      <button class="ghost" id="playSel">Play selection</button>
+      <button id="addClipBtn">Add as clip</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <span class="muted" style="font-size:.85rem">Move playhead:</span>
+      <button class="ghost small" data-nudge="-5">-5s</button>
+      <button class="ghost small" data-nudge="-1">-1s</button>
+      <button class="ghost small" data-nudge="-0.1">-0.1s</button>
+      <button class="ghost small" data-nudge="0.1">+0.1s</button>
+      <button class="ghost small" data-nudge="1">+1s</button>
+      <button class="ghost small" data-nudge="5">+5s</button>
+      <button class="ghost small" id="splitBtn">Split clip at playhead</button>
+    </div>
   </section>
 
-  <!-- STEP 3: settings -->
+  <!-- ============ 3. AUTO SUGGEST ============ -->
   <section class="card" id="settingsCard" hidden>
-    <h2>3. What do you want?</h2>
+    <h2>3. Let ClipCutter suggest the best moments</h2>
     <div class="grid">
       <div>
         <label for="lenSel">Clip length</label>
@@ -158,12 +207,18 @@
             <option value="120">2 minutes</option>
             <option value="180">3 minutes</option>
             <option value="300">5 minutes</option>
+            <option value="600">10 minutes</option>
           </optgroup>
+          <option value="custom">Custom...</option>
         </select>
+      </div>
+      <div id="customWrap" hidden>
+        <label for="customLen">Custom length (seconds)</label>
+        <input id="customLen" type="number" min="3" max="3600" value="40">
       </div>
       <div>
         <label for="countSel">How many clips?</label>
-        <input id="countSel" type="number" min="1" max="10" value="5">
+        <input id="countSel" type="number" min="1" max="20" value="5">
       </div>
       <div>
         <label for="focusSel">What counts as "best"?</label>
@@ -173,39 +228,95 @@
           <option value="0.25">Mostly action (sports, gameplay, vlogs)</option>
         </select>
       </div>
+      <div>
+        <label for="snapSel">Cut at quiet moments</label>
+        <select id="snapSel">
+          <option value="2" selected>Yes (up to 2s)</option>
+          <option value="4">Yes (up to 4s)</option>
+          <option value="0">No, exact times</option>
+        </select>
+      </div>
     </div>
-    <div style="margin-top:14px">
-      <button id="analyseBtn">Analyse video</button>
+    <div class="row" style="margin-top:14px">
+      <button id="analyseBtn">Analyse and suggest clips</button>
     </div>
-    <div class="bar"><div id="bar"></div></div>
-    <div id="status"></div>
+    <p class="hint">Suggested clips replace earlier suggestions. Clips you made or edited yourself are kept.</p>
   </section>
 
-  <!-- STEP 4: timeline graph + suggested clips -->
-  <section class="card" id="resultsCard" hidden>
-    <h2>4. Interest map (click to jump)</h2>
-    <canvas id="timeline"></canvas>
+  <!-- ============ 4. CLIPS + EXPORT OPTIONS ============ -->
+  <section class="card" id="clipsCard" hidden>
+    <h2>4. Your clips</h2>
 
-    <h2 style="margin-top:18px">5. Suggested clips</h2>
-    <div class="grid" style="margin-bottom:12px">
+    <h3>Export options (apply to every export)</h3>
+    <div class="grid">
       <div>
-        <label for="modeSel">Export shape</label>
-        <select id="modeSel">
-          <option value="crop">Vertical 9:16 (crop to fill)</option>
-          <option value="blur">Vertical 9:16 (full video + blurred bars)</option>
+        <label for="shapeSel">Shape</label>
+        <select id="shapeSel">
+          <option value="9:16">Vertical 9:16 (Shorts / Reels / TikTok)</option>
+          <option value="4:5">Portrait 4:5 (Instagram feed)</option>
+          <option value="1:1">Square 1:1</option>
+          <option value="16:9">Landscape 16:9 (YouTube)</option>
           <option value="original">Keep original shape</option>
         </select>
       </div>
       <div>
-        <label for="posSlider">Crop position (left to right)</label>
-        <input id="posSlider" type="range" min="0" max="100" value="50">
+        <label for="fitSel">How to fit the picture</label>
+        <select id="fitSel">
+          <option value="fill">Crop to fill</option>
+          <option value="blur">Whole video + blurred bars</option>
+          <option value="fit">Whole video + black bars</option>
+        </select>
       </div>
+      <div>
+        <label for="qualitySel">Quality</label>
+        <select id="qualitySel">
+          <option value="540">Light (540p)</option>
+          <option value="720" selected>Standard (720p)</option>
+          <option value="1080">High (1080p)</option>
+        </select>
+      </div>
+      <div>
+        <label for="speedSel">Speed</label>
+        <select id="speedSel">
+          <option value="0.75">0.75x slower</option>
+          <option value="1" selected>1x normal</option>
+          <option value="1.25">1.25x</option>
+          <option value="1.5">1.5x</option>
+          <option value="2">2x</option>
+        </select>
+      </div>
+      <div>
+        <label for="fadeSel">Fade in / out</label>
+        <select id="fadeSel">
+          <option value="0" selected>None</option>
+          <option value="0.5">0.5 s</option>
+          <option value="1">1 s</option>
+          <option value="2">2 s</option>
+        </select>
+      </div>
+      <div>
+        <label for="posX">Crop: left to right</label>
+        <input id="posX" type="range" min="0" max="100" value="50">
+      </div>
+      <div>
+        <label for="posY">Crop: top to bottom</label>
+        <input id="posY" type="range" min="0" max="100" value="50">
+      </div>
+      <label class="check"><input type="checkbox" id="muteChk"> Mute audio</label>
+      <label class="check"><input type="checkbox" id="titleChk"> Show clip name as title</label>
     </div>
+
+    <div class="row" style="margin-top:14px">
+      <button id="exportAllBtn">Export all clips</button>
+      <button class="ghost" id="cancelBtn" hidden>Cancel export</button>
+      <button class="danger" id="clearClipsBtn">Delete all clips</button>
+    </div>
+    <p class="hint">Exporting plays each clip in real time (a 30 s clip takes about 30 s, longer or shorter if you change speed).
+      Keep this tab open and visible while it works.</p>
+
+    <h3>Clip list</h3>
     <div id="clipList" style="display:grid;gap:10px"></div>
-    <p style="color:var(--muted);font-size:.8rem;margin-bottom:0">
-      Tip: exporting plays the clip in real time, so a 30 second clip takes about 30 seconds.
-      Keep this tab open and visible while it works.
-    </p>
+    <p id="noClips" class="muted" style="margin:0">No clips yet. Use the trimmer above or let ClipCutter suggest some.</p>
   </section>
 
 </main>
@@ -213,56 +324,52 @@
 <footer>Made for creators. Platform rules change, so check current YouTube and Instagram limits before uploading.</footer>
 
 <!-- Hidden video used only for exporting. -->
-<video id="exportVideo" playsinline></video>
+<video id="exportVideo" playsinline preload="auto"></video>
 
 <script>
 /* =====================================================================
    JAVASCRIPT STARTS HERE
    ===================================================================== */
 
-/* ---------- 1. SHORTCUTS ----------
-   $ is a tiny helper so we can write $("id") instead of document.getElementById("id"). */
-const $ = (id) => document.getElementById(id);
+/* ---------- 1. SHORTCUTS AND SETTINGS ---------- */
+const $ = (id) => document.getElementById(id);   // $("x") means document.getElementById("x")
+const FINE_RES = 4;                              // loudness samples per second (for quiet-point snapping)
+const MAX_AUDIO_BYTES = 1.5e9;                   // above this file size we skip listening (memory safety)
 
 /* ---------- 2. APP STATE ----------
-   One object that remembers everything about the current video.
-   Keeping it in one place makes bugs easier to find. */
-const state = {
-  file: null,       // the File the user picked
-  url: null,        // a temporary link to that file that <video> can play
-  duration: 0,      // video length in seconds
-  fine: [],         // sound loudness, 4 values per second (used to find quiet cut points)
-  audioPerSec: [],  // sound score 0..1 for each second
-  motionPerSec: [], // movement score 0..1 for each second
-  score: [],        // final combined score 0..1 for each second
-  clips: []         // suggested clips: {start, end, score, reason, downloadUrl}
-};
-
-const FINE_RES = 4; // how many loudness samples we take per second
+   Everything the app remembers lives here, so bugs are easy to find. */
+const lib = [];          // the video library; each item is one video object (see addFiles)
+let cur = null;          // the video that is currently selected
+let videoSeq = 1;        // counter for unique video ids
+let clipSeq = 1;         // counter for unique clip ids
+let analysing = false;   // true while analysis runs (stops double clicks)
+let exporting = false;   // true while an export runs (only one at a time)
+let cancelFlag = false;  // set to true when the user presses Cancel
 
 /* ---------- 3. SMALL HELPERS ---------- */
 
-// Turn seconds into m:ss so humans can read it.
+// Seconds to m:ss (human friendly).
 function fmt(sec) {
-  sec = Math.max(0, sec);
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
-  return m + ":" + String(s).padStart(2, "0");
+  sec = Math.max(0, sec || 0);
+  return Math.floor(sec / 60) + ":" + String(Math.floor(sec % 60)).padStart(2, "0");
 }
 
-// Show text under the progress bar and move the bar (0 to 1).
-function setStatus(text, progress) {
+// Show text under the library and move the progress bar (0 to 1). isError turns it red.
+function setStatus(text, progress, isError) {
   $("status").textContent = text;
+  $("status").className = isError ? "err" : "";
   if (progress !== undefined) $("bar").style.width = Math.round(progress * 100) + "%";
 }
 
-// Stop HTML tricks: turn special characters into safe text (used for file names).
+// Make text safe to put inside HTML.
 function esc(t) {
   return String(t).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-// Scale an array so values sit between 0 and 1.
-// We use the 95th percentile as "max" so one huge spike doesn't squash everything else.
+// Keep a number between lo and hi.
+const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+
+// Scale an array to 0..1 using the 95th percentile (one loud spike can't squash the rest).
 function normalise(arr) {
   if (!arr.length) return arr;
   const sorted = [...arr].sort((a, b) => a - b);
@@ -270,227 +377,12 @@ function normalise(arr) {
   return arr.map((v) => Math.min(1, v / (top || 1)));
 }
 
-// Smooth an array by averaging neighbours (stops one-second flickers from winning).
+// Smooth by averaging neighbours.
 function smooth(arr, radius) {
   return arr.map((_, i) => {
     let sum = 0, n = 0;
-    for (let k = i - radius; k <= i + radius; k++) {
-      if (k >= 0 && k < arr.length) { sum += arr[k]; n++; }
-    }
+    for (let k = i - radius; k <= i + radius; k++) if (k >= 0 && k < arr.length) { sum += arr[k]; n++; }
     return sum / n;
-  });
-}
-
-// Wait until a video finishes jumping to a new time (with a safety timeout).
-function seekTo(video, t) {
-  return new Promise((resolve) => {
-    const done = () => { video.removeEventListener("seeked", done); resolve(); };
-    video.addEventListener("seeked", done);
-    video.currentTime = t;
-    setTimeout(done, 3000); // never wait forever
-  });
-}
-
-/* ---------- 4. LOADING A VIDEO ---------- */
-
-const drop = $("drop");
-const fileInput = $("fileInput");
-
-drop.addEventListener("click", () => fileInput.click());
-fileInput.addEventListener("change", () => fileInput.files[0] && loadFile(fileInput.files[0]));
-
-// Drag and drop support.
-drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
-drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-drop.addEventListener("drop", (e) => {
-  e.preventDefault();
-  drop.classList.remove("over");
-  if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
-});
-
-function loadFile(file) {
-  if (!file.type.startsWith("video/")) { alert("Please choose a video file."); return; }
-
-  // Free the memory of any earlier video.
-  if (state.url) URL.revokeObjectURL(state.url);
-
-  state.file = file;
-  state.url = URL.createObjectURL(file); // a temporary local link, nothing is uploaded
-  state.clips = [];
-
-  const player = $("player");
-  player.src = state.url;
-  player.onloadedmetadata = () => {
-    state.duration = player.duration;
-    $("meta").textContent = file.name + "  |  " + fmt(state.duration) + "  |  " +
-      player.videoWidth + "x" + player.videoHeight;
-    $("playerCard").hidden = false;
-    $("settingsCard").hidden = false;
-    $("resultsCard").hidden = true;
-    setStatus("Ready. Press Analyse video.", 0);
-  };
-}
-
-/* ---------- 5. ANALYSIS PART A: SOUND ----------
-   We decode the audio into numbers, then measure loudness (RMS) for each slice.
-   Loud, lively moments usually mean excitement, laughs, key points or music hits. */
-async function analyseAudio(file) {
-  const Ctx = window.AudioContext || window.webkitAudioContext;
-  const ac = new Ctx();
-  try {
-    const bytes = await file.arrayBuffer();
-    const audio = await ac.decodeAudioData(bytes);
-    const data = audio.getChannelData(0);   // first audio channel
-    const sr = audio.sampleRate;            // samples per second
-    const slice = Math.floor(sr / FINE_RES);
-    const count = Math.ceil(audio.duration * FINE_RES);
-    const fine = new Array(count).fill(0);
-
-    for (let i = 0; i < count; i++) {
-      const start = i * slice;
-      const end = Math.min(start + slice, data.length);
-      let sum = 0, n = 0;
-      // Skip samples (step 8) to keep this fast. It is still accurate enough.
-      for (let k = start; k < end; k += 8) { sum += data[k] * data[k]; n++; }
-      fine[i] = n ? Math.sqrt(sum / n) : 0;
-    }
-    return fine;
-  } finally {
-    ac.close();
-  }
-}
-
-/* ---------- 6. ANALYSIS PART B: MOTION / SCENE CHANGES ----------
-   We jump through the video, shrink each frame to a tiny 64x36 picture and see how
-   much it differs from the previous one. Big differences = movement or a cut. */
-async function analyseMotion(url, duration) {
-  const v = document.createElement("video");
-  v.muted = true;
-  v.src = url;
-  await new Promise((res) => { v.onloadeddata = res; });
-
-  const W = 64, H = 36;
-  const c = document.createElement("canvas");
-  c.width = W; c.height = H;
-  const g = c.getContext("2d", { willReadFrequently: true });
-
-  // For long videos we sample less often so analysis stays reasonably quick (max ~300 samples).
-  const step = Math.max(1, Math.ceil(duration / 300));
-  const values = [];
-  let prev = null;
-
-  for (let t = 0; t < duration; t += step) {
-    await seekTo(v, t);
-    g.drawImage(v, 0, 0, W, H);
-    const px = g.getImageData(0, 0, W, H).data;
-    let diff = 0;
-    if (prev) {
-      for (let i = 0; i < px.length; i += 4) diff += Math.abs(px[i] - prev[i]); // compare the red channel only (fast)
-    }
-    values.push(diff);
-    prev = px;
-    setStatus("Watching the picture... " + fmt(t) + " / " + fmt(duration), 0.35 + 0.55 * (t / duration));
-  }
-
-  // Spread the sparse samples out so we have one value for every second.
-  const perSec = [];
-  for (let s = 0; s < Math.ceil(duration); s++) {
-    perSec.push(values[Math.min(values.length - 1, Math.floor(s / step))] || 0);
-  }
-  return perSec;
-}
-
-/* ---------- 7. THE MAIN ANALYSE BUTTON ---------- */
-$("analyseBtn").addEventListener("click", async () => {
-  const btn = $("analyseBtn");
-  btn.disabled = true;
-  try {
-    const secs = Math.ceil(state.duration);
-
-    // --- sound ---
-    setStatus("Listening to the sound...", 0.05);
-    let audioOk = true;
-    try {
-      state.fine = await analyseAudio(state.file);
-    } catch (err) {
-      // Very large files or odd formats may not decode. We then rely on motion only.
-      console.warn("Audio analysis failed:", err);
-      audioOk = false;
-      state.fine = new Array(secs * FINE_RES).fill(0);
-    }
-    // Average the fine samples into one number per second.
-    const audioRaw = [];
-    for (let s = 0; s < secs; s++) {
-      let sum = 0;
-      for (let k = 0; k < FINE_RES; k++) sum += state.fine[s * FINE_RES + k] || 0;
-      audioRaw.push(sum / FINE_RES);
-    }
-    state.audioPerSec = normalise(audioRaw);
-
-    // --- picture ---
-    setStatus("Watching the picture...", 0.35);
-    state.motionPerSec = normalise(await analyseMotion(state.url, state.duration));
-
-    // --- combine ---
-    // "weight" says how much we trust sound vs motion (from the dropdown).
-    let weight = parseFloat($("focusSel").value);
-    if (!audioOk) weight = 0; // no sound available, so use motion only
-    const combined = state.audioPerSec.map((a, i) => weight * a + (1 - weight) * (state.motionPerSec[i] || 0));
-    state.score = smooth(combined, 2); // smooth so single spikes don't dominate
-
-    // --- pick clips ---
-    setStatus("Choosing the best moments...", 0.95);
-    state.clips = findClips(parseInt($("lenSel").value, 10), parseInt($("countSel").value, 10));
-
-    renderResults();
-    setStatus(audioOk ? "Done! Scroll down for your clips." : "Done (no readable audio, so only motion was used).", 1);
-  } catch (err) {
-    console.error(err);
-    setStatus("Something went wrong: " + err.message, 0);
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-/* ---------- 8. PICKING THE BEST CLIPS ----------
-   Idea: slide a window of the wanted length across the video, average the score inside it,
-   then take the best windows that do not overlap each other. */
-function findClips(length, count) {
-  const secs = state.score.length;
-  length = Math.min(length, secs);              // clip cannot be longer than the video
-  const prefix = [0];                           // running totals make window averages instant
-  state.score.forEach((v, i) => prefix.push(prefix[i] + v));
-
-  // Score every possible start second.
-  const windows = [];
-  for (let start = 0; start + length <= secs; start++) {
-    windows.push({ start, mean: (prefix[start + length] - prefix[start]) / length });
-  }
-  windows.sort((a, b) => b.mean - a.mean);      // best first
-
-  const chosen = [];
-  for (const w of windows) {
-    if (chosen.length >= count) break;
-    // Reject windows that overlap with ones we already picked.
-    const overlaps = chosen.some((c) => w.start < c.rawStart + length && w.start + length > c.rawStart);
-    if (!overlaps) chosen.push({ rawStart: w.start, mean: w.mean });
-  }
-
-  // Turn each window into a final clip, snapping cut points to quiet moments.
-  return chosen.map((c) => {
-    let start = snapToQuiet(c.rawStart, 2);
-    let end = snapToQuiet(c.rawStart + length, 2);
-    if (end - start < length * 0.7) { start = c.rawStart; end = c.rawStart + length; } // safety fallback
-    end = Math.min(end, state.duration);
-
-    // Explain WHY we chose it (average sound vs average motion inside the clip).
-    const a = avg(state.audioPerSec, c.rawStart, c.rawStart + length);
-    const m = avg(state.motionPerSec, c.rawStart, c.rawStart + length);
-    let reason = "Strong overall energy";
-    if (a > m * 1.3) reason = "Loud / lively audio";
-    else if (m > a * 1.3) reason = "Lots of visual action";
-
-    return { start, end, score: c.mean, reason, downloadUrl: null };
   });
 }
 
@@ -501,24 +393,532 @@ function avg(arr, from, to) {
   return n ? sum / n : 0;
 }
 
-// Look +/- "range" seconds around a time and return the quietest spot.
-// Cutting in silence avoids chopping a word in half.
-function snapToQuiet(time, range) {
-  const centre = Math.round(time * FINE_RES);
-  const lo = Math.max(0, centre - range * FINE_RES);
-  const hi = Math.min(state.fine.length - 1, centre + range * FINE_RES);
-  let best = centre, bestVal = Infinity;
-  for (let i = lo; i <= hi; i++) {
-    if (state.fine[i] < bestVal) { bestVal = state.fine[i]; best = i; }
-  }
-  return Math.min(state.duration, Math.max(0, best / FINE_RES));
+// Wait until a video finishes jumping to a time (with a safety timeout so we never hang).
+function seekTo(video, t) {
+  return new Promise((resolve) => {
+    const done = () => { video.removeEventListener("seeked", done); resolve(); };
+    video.addEventListener("seeked", done);
+    video.currentTime = t;
+    setTimeout(done, 3000);
+  });
 }
 
-/* ---------- 9. DRAWING THE TIMELINE ---------- */
+// Wait until a video has data to show (with a timeout and an error exit).
+function whenLoaded(video, ms) {
+  return new Promise((resolve, reject) => {
+    if (video.readyState >= 2) { resolve(); return; }
+    const ok = () => { cleanup(); resolve(); };
+    const bad = () => { cleanup(); reject(new Error("This browser cannot play that video. Try an MP4 (H.264) file.")); };
+    const cleanup = () => { video.removeEventListener("loadeddata", ok); video.removeEventListener("error", bad); clearTimeout(timer); };
+    const timer = setTimeout(() => { cleanup(); reject(new Error("The video took too long to load.")); }, ms || 20000);
+    video.addEventListener("loadeddata", ok);
+    video.addEventListener("error", bad);
+  });
+}
+
+// Show unexpected errors in the status line instead of failing silently.
+window.addEventListener("error", (e) => setStatus("Error: " + e.message, undefined, true));
+window.addEventListener("unhandledrejection", (e) => setStatus("Error: " + ((e.reason && e.reason.message) || e.reason), undefined, true));
+
+/* =====================================================================
+   PART A: VIDEO LIBRARY (add, select, delete)
+   ===================================================================== */
+
+const drop = $("drop");
+const fileInput = $("fileInput");
+
+drop.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => { addFiles([...fileInput.files]); fileInput.value = ""; });
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); addFiles([...e.dataTransfer.files]); });
+
+// Is this file probably a video? (Some phones give an empty type for .mov, so we check the name too.)
+function looksLikeVideo(f) {
+  return f.type.startsWith("video/") || /\.(mp4|mov|m4v|webm|mkv|avi|3gp)$/i.test(f.name);
+}
+
+// Add one or more files to the library.
+async function addFiles(files) {
+  for (const file of files) {
+    if (!looksLikeVideo(file)) { setStatus("Skipped " + file.name + " (not a video file).", undefined, true); continue; }
+    const v = {
+      id: videoSeq++, file, name: file.name, url: URL.createObjectURL(file),
+      duration: 0, w: 0, h: 0,
+      analysed: false, audioOk: true, fine: [], audioPerSec: [], motionPerSec: [], score: [],
+      clips: [], inT: 0, outT: 0, deleted: false
+    };
+    try {
+      setStatus("Reading " + file.name + "...", 0);
+      await probe(v);                    // learn the duration and size
+    } catch (err) {
+      URL.revokeObjectURL(v.url);
+      setStatus(file.name + ": " + err.message, 0, true);
+      continue;
+    }
+    v.outT = Math.min(30, v.duration);
+    lib.push(v);
+    renderLib();
+    if (!cur) selectVideo(v);
+    setStatus("Added " + file.name + ".", 0);
+  }
+}
+
+// Load only the video's info (length and size) using a temporary video element.
+function probe(v) {
+  return new Promise((resolve, reject) => {
+    const t = document.createElement("video");
+    t.preload = "metadata";
+    const timer = setTimeout(() => reject(new Error("took too long to read.")), 20000);
+    t.onloadedmetadata = () => {
+      clearTimeout(timer);
+      v.duration = t.duration; v.w = t.videoWidth; v.h = t.videoHeight;
+      if (!isFinite(v.duration) || v.duration <= 0) reject(new Error("unknown length (is the file damaged?)."));
+      else resolve();
+    };
+    t.onerror = () => { clearTimeout(timer); reject(new Error("this browser cannot play it. Try an MP4 (H.264) file.")); };
+    t.src = v.url;
+  });
+}
+
+// Draw the list of videos.
+function renderLib() {
+  const box = $("libList");
+  box.innerHTML = "";
+  lib.forEach((v) => {
+    const el = document.createElement("div");
+    el.className = "lib-item" + (v === cur ? " active" : "");
+    el.innerHTML = `
+      <div>
+        <div class="name">${esc(v.name)}</div>
+        <div class="sub">${fmt(v.duration)} | ${v.w}x${v.h} | ${(v.file.size / 1048576).toFixed(1)} MB | ${v.clips.length} clip(s)${v.analysed ? " | analysed" : ""}</div>
+      </div>
+      <div class="row">
+        <button class="ghost small" data-vact="select" data-id="${v.id}">${v === cur ? "Selected" : "Select"}</button>
+        <button class="danger small" data-vact="delete" data-id="${v.id}">Delete</button>
+      </div>`;
+    box.appendChild(el);
+  });
+  $("deleteAllBtn").hidden = lib.length < 2;
+}
+
+// Click handling for the library buttons (one listener for all buttons).
+$("libList").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  const v = lib.find((x) => x.id === +b.dataset.id);
+  if (!v) return;
+  if (b.dataset.vact === "select") selectVideo(v);
+  if (b.dataset.vact === "delete") deleteVideo(v);
+});
+
+$("deleteAllBtn").addEventListener("click", () => {
+  if (exporting || analysing) { alert("Please wait for the current work to finish."); return; }
+  if (!confirm("Delete ALL videos and their clips from this page?")) return;
+  [...lib].forEach((v) => removeVideo(v));
+  afterLibraryChange();
+});
+
+// Delete one video (and free the memory it used).
+function deleteVideo(v) {
+  if (exporting || analysing) { alert("Please wait for the current work to finish."); return; }
+  if (!confirm('Delete "' + v.name + '" and its clips from this page? (Your original file on disk is not touched.)')) return;
+  removeVideo(v);
+  afterLibraryChange();
+}
+
+function removeVideo(v) {
+  v.deleted = true;
+  v.clips.forEach((c) => c.out && URL.revokeObjectURL(c.out.url)); // free exported files
+  URL.revokeObjectURL(v.url);
+  lib.splice(lib.indexOf(v), 1);
+  if (cur === v) cur = null;
+}
+
+// After deleting, pick another video or hide the editing panels.
+function afterLibraryChange() {
+  if (!cur && lib.length) selectVideo(lib[0]);
+  else if (!cur) {
+    $("player").removeAttribute("src");
+    $("player").load();
+    ["playerCard", "settingsCard", "clipsCard"].forEach((id) => ($(id).hidden = true));
+    setStatus("Add a video to begin.", 0);
+  }
+  renderLib();
+}
+
+// Make a video the active one.
+function selectVideo(v) {
+  cur = v;
+  const p = $("player");
+  p.src = v.url;
+  $("meta").textContent = v.name + "  |  " + fmt(v.duration) + "  |  " + v.w + "x" + v.h;
+  ["playerCard", "settingsCard", "clipsCard"].forEach((id) => ($(id).hidden = false));
+  $("inT").value = v.inT.toFixed(1);
+  $("outT").value = v.outT.toFixed(1);
+  renderLib();
+  renderClips();
+  drawTimeline();
+  setStatus(v.analysed ? "Analysed. Press the button again to re-suggest clips." : "Ready. Trim by hand or press Analyse.", 0);
+}
+
+/* =====================================================================
+   PART B: ANALYSIS (sound + motion)
+   ===================================================================== */
+
+// Measure loudness for each quarter second. Loud, lively parts often mean excitement.
+async function analyseAudio(file) {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ac = new Ctx();
+  try {
+    const audio = await ac.decodeAudioData(await file.arrayBuffer());
+    const data = audio.getChannelData(0);
+    const sr = audio.sampleRate;
+    const slice = Math.floor(sr / FINE_RES);
+    const count = Math.ceil(audio.duration * FINE_RES);
+    const fine = new Array(count).fill(0);
+    for (let i = 0; i < count; i++) {
+      const start = i * slice, end = Math.min(start + slice, data.length);
+      let sum = 0, n = 0;
+      for (let k = start; k < end; k += 8) { sum += data[k] * data[k]; n++; } // skip samples for speed
+      fine[i] = n ? Math.sqrt(sum / n) : 0;
+    }
+    return fine;
+  } finally { ac.close(); }
+}
+
+// Compare tiny versions of frames to measure movement and scene changes.
+async function analyseMotion(v) {
+  const t = document.createElement("video");
+  t.muted = true; t.preload = "auto"; t.src = v.url;
+  await whenLoaded(t);
+
+  const W = 64, H = 36;
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const g = c.getContext("2d", { willReadFrequently: true });
+
+  const step = Math.max(1, Math.ceil(v.duration / 300)); // at most ~300 samples for long videos
+  const values = [];
+  let prev = null;
+  for (let time = 0; time < v.duration; time += step) {
+    if (v.deleted) throw new Error("cancelled");
+    await seekTo(t, time);
+    g.drawImage(t, 0, 0, W, H);
+    const px = g.getImageData(0, 0, W, H).data;
+    let diff = 0;
+    if (prev) for (let i = 0; i < px.length; i += 4) diff += Math.abs(px[i] - prev[i]); // red channel only (fast)
+    values.push(diff);
+    prev = px;
+    setStatus("Watching the picture... " + fmt(time) + " / " + fmt(v.duration), 0.35 + 0.55 * (time / v.duration));
+  }
+  const perSec = [];
+  for (let s = 0; s < Math.ceil(v.duration); s++) perSec.push(values[Math.min(values.length - 1, Math.floor(s / step))] || 0);
+  return perSec;
+}
+
+// Run both analyses for one video and remember the results on the video object.
+async function analyseVideo(v) {
+  const secs = Math.ceil(v.duration);
+  setStatus("Listening to the sound...", 0.05);
+  v.audioOk = true;
+  try {
+    if (v.file.size > MAX_AUDIO_BYTES) throw new Error("file too big to listen to");
+    v.fine = await analyseAudio(v.file);
+  } catch (err) {
+    console.warn("Audio analysis skipped:", err);
+    v.audioOk = false;
+    v.fine = new Array(secs * FINE_RES).fill(0);
+  }
+  const raw = [];
+  for (let s = 0; s < secs; s++) {
+    let sum = 0;
+    for (let k = 0; k < FINE_RES; k++) sum += v.fine[s * FINE_RES + k] || 0;
+    raw.push(sum / FINE_RES);
+  }
+  v.audioPerSec = normalise(raw);
+  v.motionPerSec = normalise(await analyseMotion(v));
+  v.analysed = true;
+}
+
+// Mix sound and motion into one score per second.
+function computeScore(v) {
+  let weight = parseFloat($("focusSel").value);
+  if (!v.audioOk) weight = 0; // no usable sound, so use motion only
+  const mixed = v.audioPerSec.map((a, i) => weight * a + (1 - weight) * (v.motionPerSec[i] || 0));
+  v.score = smooth(mixed, 2);
+}
+
+/* =====================================================================
+   PART C: CHOOSING THE BEST CLIPS
+   ===================================================================== */
+
+// Read the wanted clip length from the dropdown / custom box.
+function wantedLength() {
+  if ($("lenSel").value === "custom") return clamp(parseFloat($("customLen").value) || 30, 3, 3600);
+  return parseInt($("lenSel").value, 10);
+}
+$("lenSel").addEventListener("change", () => ($("customWrap").hidden = $("lenSel").value !== "custom"));
+
+// Slide a window across the video and pick the best windows that do not overlap.
+function findClips(v, length, count, snapRange) {
+  const secs = v.score.length;
+  length = Math.min(Math.round(length), secs);
+  const prefix = [0];                                   // running totals make window averages instant
+  v.score.forEach((s, i) => prefix.push(prefix[i] + s));
+
+  const windows = [];
+  for (let start = 0; start + length <= secs; start++) {
+    windows.push({ start, mean: (prefix[start + length] - prefix[start]) / length });
+  }
+  windows.sort((a, b) => b.mean - a.mean);              // best first
+
+  const chosen = [];
+  for (const w of windows) {
+    if (chosen.length >= count) break;
+    const overlaps = chosen.some((c) => w.start < c.start + length && w.start + length > c.start);
+    if (!overlaps) chosen.push(w);
+  }
+
+  return chosen.map((c) => {
+    let start = c.start, end = c.start + length;
+    if (snapRange > 0 && v.audioOk) {
+      const s2 = snapToQuiet(v, start, snapRange), e2 = snapToQuiet(v, end, snapRange);
+      if (e2 - s2 >= length * 0.7) { start = s2; end = e2; }   // only accept if the clip is not much shorter
+    }
+    end = Math.min(end, v.duration);
+    const a = avg(v.audioPerSec, c.start, c.start + length);
+    const m = avg(v.motionPerSec, c.start, c.start + length);
+    let reason = "Strong overall energy";
+    if (a > m * 1.3) reason = "Loud / lively audio";
+    else if (m > a * 1.3) reason = "Lots of visual action";
+    return { start, end, score: c.mean, reason };
+  });
+}
+
+// Move a time to the quietest spot within +/- range seconds (avoids cutting words in half).
+function snapToQuiet(v, time, range) {
+  const centre = Math.round(time * FINE_RES);
+  const lo = Math.max(0, centre - range * FINE_RES);
+  const hi = Math.min(v.fine.length - 1, centre + range * FINE_RES);
+  let best = centre, bestVal = Infinity;
+  for (let i = lo; i <= hi; i++) if (v.fine[i] < bestVal) { bestVal = v.fine[i]; best = i; }
+  return clamp(best / FINE_RES, 0, v.duration);
+}
+
+// The big "Analyse and suggest" button.
+$("analyseBtn").addEventListener("click", async () => {
+  if (!cur || analysing) return;
+  const v = cur;
+  analysing = true;
+  $("analyseBtn").disabled = true;
+  try {
+    if (!v.analysed) await analyseVideo(v);
+    computeScore(v);
+    setStatus("Choosing the best moments...", 0.95);
+    const found = findClips(v, wantedLength(), parseInt($("countSel").value, 10) || 5, parseFloat($("snapSel").value));
+
+    // Remove old automatic suggestions, keep the clips the user made or edited.
+    v.clips = v.clips.filter((c) => {
+      if (c.auto) { c.out && URL.revokeObjectURL(c.out.url); return false; }
+      return true;
+    });
+    found.forEach((f) => v.clips.push(makeClip(f.start, f.end, { auto: true, score: f.score, reason: f.reason })));
+    v.clips.sort((a, b) => a.start - b.start);
+    v.clips.forEach((c, i) => { if (c.auto) c.label = "Moment " + (i + 1); });
+
+    setStatus(v.audioOk ? "Done! Your suggested clips are below." : "Done (no readable audio, so only motion was used).", 1);
+    if (cur === v) { renderClips(); drawTimeline(); }
+    renderLib();
+  } catch (err) {
+    if (err.message !== "cancelled") setStatus("Something went wrong: " + err.message, 0, true);
+  } finally {
+    analysing = false;
+    $("analyseBtn").disabled = false;
+  }
+});
+
+/* =====================================================================
+   PART D: CLIPS (create, edit, split, duplicate, delete)
+   ===================================================================== */
+
+// Create a clip object. "extra" can hold auto, score, reason, label.
+function makeClip(start, end, extra) {
+  return Object.assign({
+    id: clipSeq++, start, end, label: "", auto: false, score: null, reason: "Made by hand",
+    out: null,          // the exported file: {url, name, size, ext}
+    status: ""          // text shown during / after export
+  }, extra || {});
+}
+
+// Keep start/end valid for the current video.
+function fixClip(c) {
+  c.start = clamp(+c.start || 0, 0, cur.duration - 0.2);
+  c.end = clamp(+c.end || 0, c.start + 0.2, cur.duration);
+}
+
+const findClip = (id) => cur && cur.clips.find((c) => c.id === +id);
+
+// Draw all clip cards.
+function renderClips() {
+  const list = $("clipList");
+  list.innerHTML = "";
+  if (!cur) return;
+  $("noClips").hidden = cur.clips.length > 0;
+  $("exportAllBtn").disabled = !cur.clips.length || exporting;
+  $("clearClipsBtn").disabled = !cur.clips.length;
+
+  cur.clips.forEach((clip, i) => {
+    if (!clip.label) clip.label = "Clip " + (i + 1);
+    const el = document.createElement("div");
+    el.className = "clip";
+    el.dataset.id = clip.id;
+    el.innerHTML = `
+      <div class="clip-head">
+        <strong>#${i + 1}</strong>
+        <span>
+          <span class="badge">${esc(clip.reason)}</span>
+          ${clip.score !== null ? `<span class="badge">Score ${Math.round(clip.score * 100)}%</span>` : ""}
+          <span class="badge ok" data-role="fit"></span>
+        </span>
+      </div>
+      <div class="row">
+        <div class="grow" style="flex:2 1 180px"><label>Clip name</label><input type="text" data-field="label" value="${esc(clip.label)}"></div>
+        <div class="grow"><label>Start (s)</label><input type="number" step="0.1" min="0" data-field="start" value="${clip.start.toFixed(1)}"></div>
+        <div class="grow"><label>End (s)</label><input type="number" step="0.1" min="0" data-field="end" value="${clip.end.toFixed(1)}"></div>
+      </div>
+      <div class="row">
+        <button class="ghost small" data-act="startM">Start -0.5s</button>
+        <button class="ghost small" data-act="startP">Start +0.5s</button>
+        <button class="ghost small" data-act="endM">End -0.5s</button>
+        <button class="ghost small" data-act="endP">End +0.5s</button>
+        <button class="ghost small" data-act="setStart">Start = playhead</button>
+        <button class="ghost small" data-act="setEnd">End = playhead</button>
+      </div>
+      <div class="row">
+        <button class="ghost" data-act="preview">Preview</button>
+        <button class="ghost" data-act="split">Split at playhead</button>
+        <button class="ghost" data-act="dup">Duplicate</button>
+        <button class="danger" data-act="del">Delete clip</button>
+        <button data-act="export">Export clip</button>
+      </div>
+      <div data-role="result" class="muted" style="font-size:.88rem"></div>
+      <div class="bar"><div data-role="bar"></div></div>`;
+    list.appendChild(el);
+    updateClipCard(clip);
+  });
+}
+
+// Refresh the small live parts of one card (inputs, badge, result) without redrawing everything.
+function updateClipCard(clip) {
+  const el = $("clipList").querySelector(`.clip[data-id="${clip.id}"]`);
+  if (!el) return;
+  const set = (f, val) => { const i = el.querySelector(`[data-field="${f}"]`); if (i && document.activeElement !== i) i.value = val; };
+  set("start", clip.start.toFixed(1));
+  set("end", clip.end.toFixed(1));
+
+  const d = clip.end - clip.start;
+  const tags = [];
+  if (d <= 60) tags.push("Shorts");
+  if (d <= 90) tags.push("Reels");
+  el.querySelector('[data-role="fit"]').textContent =
+    (tags.length ? "Fits " + tags.join(" + ") + " - " : "") + Math.round(d) + "s (" + fmt(clip.start) + " to " + fmt(clip.end) + ")";
+
+  const res = el.querySelector('[data-role="result"]');
+  if (clip.out) {
+    res.innerHTML = `<a class="dl" href="${clip.out.url}" download="${esc(clip.out.name)}">Download ${esc(clip.out.name)} (${(clip.out.size / 1048576).toFixed(1)} MB)</a>
+      <button class="danger small" data-act="deldl">Delete exported file</button>` +
+      (clip.out.ext === "webm" ? `<div class="hint">WebM file. If Instagram rejects it, convert to MP4 (HandBrake, CloudConvert) or use Chrome, which can save MP4.</div>` : "");
+  } else {
+    res.textContent = clip.status || "";
+  }
+}
+
+// All clip card buttons go through this one listener (event delegation).
+$("clipList").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  const clip = findClip(b.closest(".clip").dataset.id);
+  if (!clip) return;
+  const act = b.dataset.act;
+  const p = $("player");
+
+  const edited = () => { clip.auto = false; fixClip(clip); updateClipCard(clip); drawTimeline(); };
+
+  if (act === "startM") { clip.start -= 0.5; edited(); }
+  else if (act === "startP") { clip.start += 0.5; edited(); }
+  else if (act === "endM") { clip.end -= 0.5; edited(); }
+  else if (act === "endP") { clip.end += 0.5; edited(); }
+  else if (act === "setStart") { clip.start = p.currentTime; edited(); }
+  else if (act === "setEnd") { clip.end = p.currentTime; edited(); }
+  else if (act === "preview") previewRange(clip.start, clip.end);
+  else if (act === "split") { if (!splitClip(clip, p.currentTime)) setStatus("Move the playhead inside this clip first (at least 0.3 s from each edge).", undefined, true); }
+  else if (act === "dup") {
+    const copy = makeClip(clip.start, clip.end, { label: clip.label + " copy", reason: "Copy" });
+    cur.clips.splice(cur.clips.indexOf(clip) + 1, 0, copy);
+    renderClips(); drawTimeline(); renderLib();
+  }
+  else if (act === "del") deleteClip(clip);
+  else if (act === "deldl") { URL.revokeObjectURL(clip.out.url); clip.out = null; clip.status = ""; updateClipCard(clip); }
+  else if (act === "export") exportOne(clip);
+});
+
+// Editing the typed fields.
+$("clipList").addEventListener("change", (e) => {
+  const f = e.target.dataset.field;
+  if (!f) return;
+  const clip = findClip(e.target.closest(".clip").dataset.id);
+  if (!clip) return;
+  if (f === "label") { clip.label = e.target.value.trim() || "Clip"; return; }
+  clip[f] = parseFloat(e.target.value);
+  clip.auto = false;
+  fixClip(clip);
+  updateClipCard(clip);
+  drawTimeline();
+});
+
+// Split a clip in two at a time. Returns false if the time is not inside the clip.
+function splitClip(clip, t) {
+  if (t < clip.start + 0.3 || t > clip.end - 0.3) return false;
+  const second = makeClip(t, clip.end, { label: clip.label + " (2)", reason: "Split" });
+  clip.end = t;
+  clip.auto = false;
+  clip.label = clip.label.replace(/ \(1\)$/, "") + " (1)";
+  cur.clips.splice(cur.clips.indexOf(clip) + 1, 0, second);
+  renderClips(); drawTimeline(); renderLib();
+  return true;
+}
+
+function deleteClip(clip) {
+  if (clip.out) URL.revokeObjectURL(clip.out.url);
+  cur.clips.splice(cur.clips.indexOf(clip), 1);
+  renderClips(); drawTimeline(); renderLib();
+}
+
+$("clearClipsBtn").addEventListener("click", () => {
+  if (!cur || !cur.clips.length) return;
+  if (exporting) { alert("Please wait for the export to finish."); return; }
+  if (!confirm("Delete all " + cur.clips.length + " clips of this video?")) return;
+  cur.clips.forEach((c) => c.out && URL.revokeObjectURL(c.out.url));
+  cur.clips = [];
+  renderClips(); drawTimeline(); renderLib();
+});
+
+/* =====================================================================
+   PART E: MANUAL TRIMMER (timeline with In/Out handles)
+   ===================================================================== */
+
+const player = $("player");
+let dragging = null;   // "in", "out" or "seek" while the mouse/finger is down on the timeline
+
+// Convert between a time in seconds and an x position on the canvas.
+const timeToX = (t, W) => (t / cur.duration) * W;
+const xToTime = (x, W) => clamp((x / W) * cur.duration, 0, cur.duration);
+
 function drawTimeline() {
   const c = $("timeline");
-  // Make the canvas sharp on high-resolution screens.
-  const dpr = window.devicePixelRatio || 1;
+  if (!cur || c.offsetParent === null) return;
+  const dpr = window.devicePixelRatio || 1;       // keep it sharp on high-resolution screens
   c.width = c.clientWidth * dpr;
   c.height = c.clientHeight * dpr;
   const g = c.getContext("2d");
@@ -526,230 +926,361 @@ function drawTimeline() {
   const W = c.clientWidth, H = c.clientHeight;
   g.clearRect(0, 0, W, H);
 
-  const n = state.score.length;
-  if (!n) return;
+  // Interest graph (only after analysis).
+  if (cur.score.length) {
+    const n = cur.score.length;
+    g.beginPath();
+    g.moveTo(0, H);
+    for (let i = 0; i < n; i++) g.lineTo((i / n) * W, H - cur.score[i] * (H - 24) - 2);
+    g.lineTo(W, H);
+    g.closePath();
+    g.fillStyle = "rgba(77,171,255,.35)";
+    g.fill();
+  } else {
+    g.fillStyle = "#586079";
+    g.font = "12px system-ui";
+    g.fillText("Press Analyse to see where the interesting parts are", 10, H / 2);
+  }
 
-  // Filled graph of the score.
-  g.beginPath();
-  g.moveTo(0, H);
-  for (let i = 0; i < n; i++) g.lineTo((i / n) * W, H - state.score[i] * (H - 14) - 2);
-  g.lineTo(W, H);
-  g.closePath();
-  g.fillStyle = "rgba(77,171,255,.35)";
-  g.fill();
-
-  // Highlight each suggested clip and number it.
-  state.clips.forEach((clip, i) => {
-    const x1 = (clip.start / state.duration) * W;
-    const x2 = (clip.end / state.duration) * W;
-    g.fillStyle = "rgba(255,77,109,.30)";
+  // Existing clips (red bands with numbers).
+  cur.clips.forEach((clip, i) => {
+    const x1 = timeToX(clip.start, W), x2 = timeToX(clip.end, W);
+    g.fillStyle = "rgba(255,77,109,.28)";
     g.fillRect(x1, 0, Math.max(2, x2 - x1), H);
     g.fillStyle = "#fff";
-    g.font = "12px system-ui";
-    g.fillText("#" + (i + 1), x1 + 4, 14);
+    g.font = "11px system-ui";
+    g.fillText("#" + (i + 1), x1 + 3, 12);
   });
+
+  // The In/Out selection (green) with handles.
+  const xi = timeToX(cur.inT, W), xo = timeToX(cur.outT, W);
+  g.fillStyle = "rgba(61,220,151,.18)";
+  g.fillRect(xi, 0, Math.max(1, xo - xi), H);
+  g.fillStyle = "#3ddc97";
+  g.fillRect(xi - 2, 0, 4, H);
+  g.fillRect(xo - 2, 0, 4, H);
+  g.fillRect(xi - 6, H - 16, 12, 16);   // grab boxes
+  g.fillRect(xo - 6, H - 16, 12, 16);
+
+  // The playhead (white line).
+  const xp = timeToX(player.currentTime || 0, W);
+  g.fillStyle = "#fff";
+  g.fillRect(xp - 1, 0, 2, H);
 }
 
-// Clicking the timeline jumps the player to that time.
-$("timeline").addEventListener("click", (e) => {
-  const rect = e.target.getBoundingClientRect();
-  $("player").currentTime = ((e.clientX - rect.left) / rect.width) * state.duration;
-});
-window.addEventListener("resize", () => { if (state.score.length) drawTimeline(); });
+// Keep the timeline moving while the video plays.
+["timeupdate", "seeked", "play", "pause", "loadedmetadata"].forEach((ev) => player.addEventListener(ev, drawTimeline));
+window.addEventListener("resize", drawTimeline);
+setInterval(() => { if (!player.paused) drawTimeline(); }, 120);
 
-/* ---------- 10. SHOWING THE CLIP CARDS ---------- */
-function renderResults() {
-  $("resultsCard").hidden = false;
+// Put the In/Out values on screen and keep them valid.
+function setInOut(inT, outT) {
+  if (!cur) return;
+  inT = clamp(inT, 0, cur.duration);
+  outT = clamp(outT, 0, cur.duration);
+  if (outT < inT) outT = inT;
+  cur.inT = inT; cur.outT = outT;
+  $("inT").value = inT.toFixed(1);
+  $("outT").value = outT.toFixed(1);
   drawTimeline();
-
-  const list = $("clipList");
-  list.innerHTML = "";
-
-  state.clips.forEach((clip, i) => {
-    const dur = clip.end - clip.start;
-    const el = document.createElement("div");
-    el.className = "clip";
-    el.innerHTML = `
-      <div class="clip-head">
-        <strong>Clip #${i + 1}  <span style="color:var(--muted);font-weight:400">${fmt(clip.start)} - ${fmt(clip.end)}</span></strong>
-        <span>
-          <span class="badge">${esc(clip.reason)}</span>
-          <span class="badge">Score ${Math.round(clip.score * 100)}%</span>
-          <span class="badge ok" data-role="fit"></span>
-        </span>
-      </div>
-      <div class="row">
-        <div><label>Start (seconds)</label><input type="number" step="0.1" min="0" data-role="start" value="${clip.start.toFixed(1)}"></div>
-        <div><label>End (seconds)</label><input type="number" step="0.1" min="0" data-role="end" value="${clip.end.toFixed(1)}"></div>
-        <button class="ghost" data-role="setStart">Start = player time</button>
-        <button class="ghost" data-role="setEnd">End = player time</button>
-      </div>
-      <div class="row">
-        <button class="ghost" data-role="preview">Preview</button>
-        <button data-role="export">Export clip</button>
-        <div data-role="result" style="flex:3"></div>
-      </div>
-      <div class="bar"><div data-role="bar"></div></div>
-    `;
-    list.appendChild(el);
-
-    // Small helper: find an element inside THIS card.
-    const q = (role) => el.querySelector(`[data-role="${role}"]`);
-
-    // Show whether the length suits each platform (a friendly hint, not a rule).
-    function updateFit() {
-      const d = clip.end - clip.start;
-      const tags = [];
-      if (d <= 60) tags.push("Shorts");
-      if (d <= 90) tags.push("Reels");
-      q("fit").textContent = tags.length ? "Fits " + tags.join(" + ") + " (" + Math.round(d) + "s)" : Math.round(d) + "s";
-    }
-    updateFit();
-
-    // When the user edits the numbers, update the clip.
-    q("start").addEventListener("change", () => { clip.start = parseFloat(q("start").value) || 0; updateFit(); drawTimeline(); });
-    q("end").addEventListener("change", () => { clip.end = parseFloat(q("end").value) || clip.end; updateFit(); drawTimeline(); });
-
-    // Copy the main player's time into start/end.
-    q("setStart").addEventListener("click", () => { clip.start = $("player").currentTime; q("start").value = clip.start.toFixed(1); updateFit(); drawTimeline(); });
-    q("setEnd").addEventListener("click", () => { clip.end = $("player").currentTime; q("end").value = clip.end.toFixed(1); updateFit(); drawTimeline(); });
-
-    q("preview").addEventListener("click", () => previewClip(clip));
-    q("export").addEventListener("click", () => exportClip(clip, q("export"), q("bar"), q("result")));
-  });
 }
 
-/* ---------- 11. PREVIEW ---------- */
+// Mouse / finger on the timeline: grab a handle if near one, otherwise seek.
+$("timeline").addEventListener("pointerdown", (e) => {
+  if (!cur) return;
+  const c = e.currentTarget;
+  c.setPointerCapture(e.pointerId);
+  const rect = c.getBoundingClientRect();
+  const x = e.clientX - rect.left, W = rect.width;
+  if (Math.abs(x - timeToX(cur.inT, W)) < 10) dragging = "in";
+  else if (Math.abs(x - timeToX(cur.outT, W)) < 10) dragging = "out";
+  else { dragging = "seek"; player.currentTime = xToTime(x, W); }
+});
+$("timeline").addEventListener("pointermove", (e) => {
+  if (!dragging || !cur) return;
+  const rect = e.currentTarget.getBoundingClientRect();
+  const t = xToTime(e.clientX - rect.left, rect.width);
+  if (dragging === "in") setInOut(Math.min(t, cur.outT), cur.outT);
+  else if (dragging === "out") setInOut(cur.inT, Math.max(t, cur.inT));
+  else player.currentTime = t;
+});
+["pointerup", "pointercancel"].forEach((n) => $("timeline").addEventListener(n, () => (dragging = null)));
+
+// Buttons and typed boxes for In / Out.
+$("setIn").addEventListener("click", () => setInOut(player.currentTime, Math.max(cur.outT, player.currentTime)));
+$("setOut").addEventListener("click", () => setInOut(Math.min(cur.inT, player.currentTime), player.currentTime));
+$("inT").addEventListener("change", () => setInOut(parseFloat($("inT").value) || 0, cur.outT));
+$("outT").addEventListener("change", () => setInOut(cur.inT, parseFloat($("outT").value) || 0));
+$("playSel").addEventListener("click", () => previewRange(cur.inT, cur.outT));
+
+// Make a clip from the current In/Out selection.
+$("addClipBtn").addEventListener("click", () => {
+  if (!cur) return;
+  if (cur.outT - cur.inT < 0.5) { setStatus("Make the selection at least 0.5 seconds long.", undefined, true); return; }
+  cur.clips.push(makeClip(cur.inT, cur.outT));
+  cur.clips.sort((a, b) => a.start - b.start);
+  renderClips(); drawTimeline(); renderLib();
+  setStatus("Clip added. Scroll down to export it.", 0);
+});
+
+// Move the playhead by a number of seconds.
+document.querySelectorAll("[data-nudge]").forEach((b) =>
+  b.addEventListener("click", () => { if (cur) player.currentTime = clamp(player.currentTime + parseFloat(b.dataset.nudge), 0, cur.duration); }));
+
+// Split whichever clip the playhead is inside.
+$("splitBtn").addEventListener("click", () => {
+  if (!cur) return;
+  const t = player.currentTime;
+  const clip = cur.clips.find((c) => t > c.start + 0.3 && t < c.end - 0.3);
+  if (!clip || !splitClip(clip, t)) setStatus("Move the playhead inside a clip first (at least 0.3 s from its edges).", undefined, true);
+});
+
+// Keyboard shortcuts (ignored while typing in a box).
+document.addEventListener("keydown", (e) => {
+  if (!cur || ["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName)) return;
+  const step = e.shiftKey ? 0.1 : 1;
+  if (e.key === "i" || e.key === "I") $("setIn").click();
+  else if (e.key === "o" || e.key === "O") $("setOut").click();
+  else if (e.key === "ArrowLeft") { player.currentTime = clamp(player.currentTime - step, 0, cur.duration); e.preventDefault(); }
+  else if (e.key === "ArrowRight") { player.currentTime = clamp(player.currentTime + step, 0, cur.duration); e.preventDefault(); }
+});
+
+// Play from a start time and stop at an end time.
 let previewTimer = null;
-function previewClip(clip) {
-  const p = $("player");
-  p.currentTime = clip.start;
-  p.play();
+function previewRange(start, end) {
+  player.currentTime = start;
+  player.play();
   clearInterval(previewTimer);
-  // Check every 100 ms and stop when we reach the clip end.
   previewTimer = setInterval(() => {
-    if (p.currentTime >= clip.end || p.paused) { p.pause(); clearInterval(previewTimer); }
+    if (player.currentTime >= end || player.paused) { player.pause(); clearInterval(previewTimer); }
   }, 100);
-  p.scrollIntoView({ behavior: "smooth", block: "center" });
+  player.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
-/* ---------- 12. EXPORT ----------
-   Browsers cannot "cut" a video file directly, so we do the clever trick:
-     - play the wanted part on a hidden video
-     - copy every frame to a canvas (this is where we crop to 9:16)
-     - record the canvas + the audio with MediaRecorder
-   Downside: it runs in real time. Upgrade path: ffmpeg.wasm. */
-async function exportClip(clip, button, barEl, resultEl) {
-  if (!window.MediaRecorder) { alert("Your browser cannot record video. Try Chrome, Edge or Firefox on a computer."); return; }
-  if (clip.end <= clip.start) { alert("End must be after start."); return; }
+/* =====================================================================
+   PART F: EXPORT
+   Browsers cannot "cut" a video file directly, so we:
+     1) play the wanted part on a hidden video,
+     2) copy each frame onto a canvas (crop, fade, title are done here),
+     3) record the canvas + audio with MediaRecorder.
+   Downside: it runs in real time. Upgrade path: ffmpeg.wasm.
+   ===================================================================== */
 
-  button.disabled = true;
-  resultEl.textContent = "Exporting... keep this tab open.";
-  barEl.style.width = "0%";
+// Read all export options from the page at the moment of export.
+function readOptions() {
+  return {
+    shape: $("shapeSel").value, fit: $("fitSel").value, quality: parseInt($("qualitySel").value, 10),
+    speed: parseFloat($("speedSel").value), fade: parseFloat($("fadeSel").value),
+    posX: parseInt($("posX").value, 10) / 100, posY: parseInt($("posY").value, 10) / 100,
+    mute: $("muteChk").checked, title: $("titleChk").checked
+  };
+}
 
-  const mode = $("modeSel").value;                   // crop, blur or original
-  const pos = parseInt($("posSlider").value, 10) / 100; // 0 = left, 1 = right
+// Work out the output size. "quality" is the short side in pixels. Sizes must be even numbers.
+function outputSize(o, vw, vh) {
+  const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+  const q = o.quality;
+  if (o.shape === "original") {
+    const f = Math.min(1, q / Math.min(vw, vh));
+    return [even(vw * f), even(vh * f)];
+  }
+  if (o.shape === "9:16") return [even(q), even(q * 16 / 9)];
+  if (o.shape === "4:5") return [even(q), even(q * 5 / 4)];
+  if (o.shape === "1:1") return [even(q), even(q)];
+  return [even(q * 16 / 9), even(q)]; // 16:9
+}
+
+// Draw the current video frame onto the canvas in the chosen way.
+function drawFrame(g, ev, W, H, o) {
+  const vw = ev.videoWidth, vh = ev.videoHeight;
+  g.fillStyle = "#000";
+  g.fillRect(0, 0, W, H);
+  if (o.shape === "original") { g.drawImage(ev, 0, 0, W, H); return; }
+
+  if (o.fit === "fill") {
+    // "cover": zoom until the canvas is full, then slide left/right/up/down.
+    const s = Math.max(W / vw, H / vh);
+    const dw = vw * s, dh = vh * s;
+    g.drawImage(ev, (W - dw) * o.posX, (H - dh) * o.posY, dw, dh);
+    return;
+  }
+  if (o.fit === "blur") {
+    // First a blurred, zoomed copy as background (Safari may ignore the blur; it will just look zoomed).
+    const sc = Math.max(W / vw, H / vh);
+    g.filter = "blur(28px) brightness(.7)";
+    g.drawImage(ev, (W - vw * sc) / 2, (H - vh * sc) / 2, vw * sc, vh * sc);
+    g.filter = "none";
+  }
+  // Whole video sharp in the middle.
+  const sf = Math.min(W / vw, H / vh);
+  g.drawImage(ev, (W - vw * sf) / 2, (H - vh * sf) / 2, vw * sf, vh * sf);
+}
+
+// Draw text (the clip name) near the top, wrapped onto up to 3 lines.
+function drawTitle(g, text, W, H) {
+  const size = Math.round(Math.min(W, H) * 0.07);
+  g.font = "700 " + size + "px system-ui, sans-serif";
+  g.textAlign = "center";
+  g.textBaseline = "top";
+  g.fillStyle = "#fff";
+  g.shadowColor = "rgba(0,0,0,.85)";
+  g.shadowBlur = size * 0.3;
+  const maxW = W * 0.9, words = text.split(/\s+/), lines = [];
+  let line = "";
+  words.forEach((w) => {
+    const test = line ? line + " " + w : w;
+    if (g.measureText(test).width > maxW && line) { lines.push(line); line = w; } else line = test;
+  });
+  lines.push(line);
+  lines.slice(0, 3).forEach((l, i) => g.fillText(l, W / 2, H * 0.06 + i * size * 1.2));
+  g.shadowBlur = 0;
+  g.textAlign = "start";
+}
+
+// Turn a name into a safe file name.
+const slug = (t) => (t || "clip").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "clip";
+
+// Export ONE clip. Resolves with true if finished, false if cancelled.
+async function exportClip(v, clip) {
+  if (!window.MediaRecorder) throw new Error("This browser cannot record video. Use Chrome, Edge or Firefox on a computer.");
+  const o = readOptions();
+  const card = $("clipList").querySelector(`.clip[data-id="${clip.id}"]`);
+  const barEl = card && card.querySelector('[data-role="bar"]');
+  const say = (t) => { clip.status = t; if (!clip.out) updateClipCard(clip); };
+
+  if (clip.out) { URL.revokeObjectURL(clip.out.url); clip.out = null; }
+  say("Preparing...");
+  if (barEl) barEl.style.width = "0%";
 
   const ev = $("exportVideo");
-  ev.src = state.url;
-  await new Promise((res) => { ev.onloadeddata = res; });
+  ev.src = v.url;
+  await whenLoaded(ev);
 
-  // ----- decide the output size -----
-  let W, H;
-  if (mode === "original") {
-    const scale = Math.min(1, 1280 / Math.max(ev.videoWidth, ev.videoHeight)); // do not upscale, cap at 1280
-    W = Math.round(ev.videoWidth * scale);
-    H = Math.round(ev.videoHeight * scale);
-  } else {
-    W = 720; H = 1280; // 9:16 vertical
-  }
+  const [W, H] = outputSize(o, ev.videoWidth, ev.videoHeight);
   const canvas = document.createElement("canvas");
   canvas.width = W; canvas.height = H;
   const g = canvas.getContext("2d");
 
-  // ----- connect the sound to the recorder (not to the speakers) -----
+  // --- sound: video element -> volume control -> recorder (not the speakers) ---
   const Ctx = window.AudioContext || window.webkitAudioContext;
   const ac = new Ctx();
   await ac.resume();
-  const src = ac.createMediaElementSource(ev);
-  const dest = ac.createMediaStreamDestination();
-  src.connect(dest);
+  const tracks = [...canvas.captureStream(30).getVideoTracks()];
+  let gain = null;
+  if (!o.mute) {
+    const src = ac.createMediaElementSource(ev);
+    gain = ac.createGain();
+    const dest = ac.createMediaStreamDestination();
+    src.connect(gain);
+    gain.connect(dest);
+    tracks.push(...dest.stream.getAudioTracks());
+  }
+  const stream = new MediaStream(tracks);
 
-  // ----- combine picture + sound into one stream -----
-  const stream = new MediaStream([
-    ...canvas.captureStream(30).getVideoTracks(),
-    ...dest.stream.getAudioTracks()
-  ]);
-
-  // Pick the best format this browser can record (MP4 is best for Instagram).
+  // Pick the best format this browser can record (MP4 first, best for Instagram).
   const types = ["video/mp4;codecs=avc1,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
   const mime = types.find((t) => MediaRecorder.isTypeSupported(t)) || "";
   const ext = mime.includes("mp4") ? "mp4" : "webm";
+  const bitrate = clamp(Math.round(W * H * 30 * 0.09), 2e6, 12e6);
 
   const chunks = [];
-  const rec = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: 6000000 });
+  const rec = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: bitrate });
   rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
 
-  // Draw the current video frame onto the canvas, using the chosen shape.
-  function draw() {
-    const vw = ev.videoWidth, vh = ev.videoHeight;
-    g.fillStyle = "#000";
-    g.fillRect(0, 0, W, H);
+  const total = clip.end - clip.start;                   // length in the ORIGINAL video
+  const fadeMedia = o.fade * o.speed;                    // fade length measured in video time
+  let cancelled = false;
 
-    if (mode === "original") {
-      g.drawImage(ev, 0, 0, W, H);
+  try {
+    await seekTo(ev, clip.start);
+    ev.playbackRate = o.speed;
+    rec.start(250);
+    await ev.play();
+    say("Exporting... keep this tab open.");
 
-    } else if (mode === "crop") {
-      // "cover": scale up until the canvas is completely filled, then slide left/right.
-      const s = Math.max(W / vw, H / vh);
-      const dw = vw * s, dh = vh * s;
-      g.drawImage(ev, (W - dw) * pos, (H - dh) / 2, dw, dh);
+    await new Promise((resolve) => {
+      function loop() {
+        if (cancelFlag) { cancelled = true; resolve(); return; }
+        drawFrame(g, ev, W, H, o);
 
-    } else {
-      // "blur": first a blurred, zoomed copy as the background...
-      const sCover = Math.max(W / vw, H / vh);
-      g.filter = "blur(28px) brightness(.7)";
-      g.drawImage(ev, (W - vw * sCover) / 2, (H - vh * sCover) / 2, vw * sCover, vh * sCover);
-      g.filter = "none";
-      // ...then the whole video sharp, in the middle.
-      const sFit = Math.min(W / vw, H / vh);
-      g.drawImage(ev, (W - vw * sFit) / 2, (H - vh * sFit) / 2, vw * sFit, vh * sFit);
-    }
+        // Fade: 0 = fully visible, 1 = fully black. Applies at the start and the end.
+        let dark = 0;
+        if (fadeMedia > 0) {
+          const t = ev.currentTime - clip.start, left = clip.end - ev.currentTime;
+          dark = clamp(Math.max(1 - t / fadeMedia, 1 - left / fadeMedia, 0), 0, 1);
+        }
+        if (dark > 0) { g.fillStyle = "rgba(0,0,0," + dark + ")"; g.fillRect(0, 0, W, H); }
+        if (gain) gain.gain.value = 1 - dark;
+        if (o.title && clip.label) drawTitle(g, clip.label, W, H);
+
+        const done = ev.currentTime - clip.start;
+        if (barEl) barEl.style.width = clamp((done / total) * 100, 0, 100) + "%";
+        if (ev.currentTime >= clip.end || ev.ended) { resolve(); return; }
+        requestAnimationFrame(loop);
+      }
+      loop();
+    });
+  } finally {
+    ev.pause();
+    ev.playbackRate = 1;
+    if (rec.state !== "inactive") await new Promise((res) => { rec.onstop = res; rec.stop(); });
+    ac.close();
   }
 
-  // Jump to the start, then record while playing.
-  await seekTo(ev, clip.start);
-  rec.start(250);
-  await ev.play();
+  if (cancelled) { say("Cancelled."); if (barEl) barEl.style.width = "0%"; return false; }
 
-  const total = clip.end - clip.start;
-  await new Promise((resolve) => {
-    function loop() {
-      draw();
-      const done = ev.currentTime - clip.start;
-      barEl.style.width = Math.min(100, (done / total) * 100) + "%";
-      if (ev.currentTime >= clip.end || ev.ended) { resolve(); return; }
-      requestAnimationFrame(loop);
-    }
-    loop();
-  });
-
-  // Stop everything and wait for the recorder to finish writing.
-  ev.pause();
-  await new Promise((res) => { rec.onstop = res; rec.stop(); });
-  ac.close();
-
-  // Build the downloadable file.
   const blob = new Blob(chunks, { type: mime || "video/webm" });
-  if (clip.downloadUrl) URL.revokeObjectURL(clip.downloadUrl);
-  clip.downloadUrl = URL.createObjectURL(blob);
-
-  const name = "clip_" + fmt(clip.start).replace(":", "m") + "s." + ext;
-  resultEl.innerHTML = `<a class="dl" href="${clip.downloadUrl}" download="${esc(name)}">Download ${esc(name)} (${(blob.size / 1048576).toFixed(1)} MB)</a>` +
-    (ext === "webm" ? `<div style="color:var(--muted);font-size:.8rem">WebM file. If Instagram rejects it, convert it to MP4 (e.g. with HandBrake or CloudConvert) or use Chrome, which can save MP4 directly.</div>` : "");
-  barEl.style.width = "100%";
-  button.disabled = false;
+  if (!blob.size) throw new Error("The recording came out empty. Try Chrome or Edge.");
+  clip.out = { url: URL.createObjectURL(blob), name: slug(clip.label) + "." + ext, size: blob.size, ext };
+  if (barEl) barEl.style.width = "100%";
+  updateClipCard(clip);
+  return true;
 }
+
+// Turn the export buttons on/off while something is exporting.
+function setExportingUI(on) {
+  exporting = on;
+  cancelFlag = false;
+  $("cancelBtn").hidden = !on;
+  $("exportAllBtn").disabled = on || !(cur && cur.clips.length);
+  document.querySelectorAll('[data-act="export"]').forEach((b) => (b.disabled = on));
+}
+
+// Export a single clip (button on a clip card).
+async function exportOne(clip) {
+  if (exporting) return;
+  const v = cur;
+  setExportingUI(true);
+  try { await exportClip(v, clip); setStatus("Export finished.", 0); }
+  catch (err) { clip.status = "Failed: " + err.message; updateClipCard(clip); setStatus("Export failed: " + err.message, 0, true); }
+  finally { setExportingUI(false); }
+}
+
+// Export every clip of the current video, one after another.
+$("exportAllBtn").addEventListener("click", async () => {
+  if (exporting || !cur || !cur.clips.length) return;
+  const v = cur, list = [...v.clips];
+  setExportingUI(true);
+  try {
+    for (let i = 0; i < list.length; i++) {
+      if (v.deleted || cancelFlag) break;
+      setStatus("Exporting clip " + (i + 1) + " of " + list.length + "...", i / list.length);
+      try { if (!(await exportClip(v, list[i]))) break; }
+      catch (err) { list[i].status = "Failed: " + err.message; updateClipCard(list[i]); }
+    }
+    setStatus(cancelFlag ? "Export cancelled." : "All exports finished. Download each clip from its card.", cancelFlag ? 0 : 1);
+  } finally { setExportingUI(false); }
+});
+
+$("cancelBtn").addEventListener("click", () => { cancelFlag = true; });
+
+/* ---------- START-UP ---------- */
+(function init() {
+  const missing = [];
+  if (!window.MediaRecorder) missing.push("video recording (export will not work)");
+  if (!(window.AudioContext || window.webkitAudioContext)) missing.push("audio analysis");
+  setStatus(missing.length ? "Your browser lacks: " + missing.join(", ") + ". Use Chrome or Edge on a computer." : "Add a video to begin.", 0, missing.length > 0);
+})();
 </script>
 </body>
 </html>
