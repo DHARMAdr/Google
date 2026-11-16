@@ -40,7 +40,7 @@
 const Diag = (function () {
   "use strict";
 
-  const APP_VERSION = "3.3.0";
+  const APP_VERSION = "4.0.0";
   const START = Date.now();
   const logs = [];            // recent console lines
   const crumbs = [];          // recent clicks and stage changes

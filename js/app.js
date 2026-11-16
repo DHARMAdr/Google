@@ -97,12 +97,13 @@ function syncUI() {
   $("sensVal").textContent = (parseFloat($("sensSel").value) || 1).toFixed(1);
 
   const eng = $("engineSel").value;
-  document.querySelectorAll(".hq-only").forEach((e) => (e.hidden = eng !== "hq"));
+  document.querySelectorAll(".hq-only").forEach((e) => (e.hidden = eng !== "hq" && eng !== "turbo"));
   document.querySelectorAll(".shape-only").forEach((e) => {
     e.style.opacity = eng === "copy" ? 0.4 : 1;
     e.querySelectorAll("select,input").forEach((i) => (i.disabled = eng === "copy"));
   });
   $("engineHint").textContent = {
+    turbo: "Uses the video chip of your phone / PC (hardware H.264 encoder). The clip is played once while it is encoded, so it takes about as long as the clip itself instead of minutes or hours. Sharp picture, your chosen shape, title, fades and sound. If the device has no hardware encoder it falls back to the ffmpeg engine by itself.",
     hq: "Real H.264 encoding with ffmpeg: sharp picture, original frame rate, no dropped frames. It is slower than the clip itself (a 30 s Full HD clip can take a few minutes), and the tab should stay open. 'Quick' is the fastest, 'Maximum' the sharpest.",
     copy: "Instant and lossless: the file is cut without touching the picture. It keeps the original shape (no 9:16 crop), and the start can be up to ~2 s early because cuts happen at keyframes.",
     fast: "Plays the clip and records it in real time. Quick to start, but the picture is re-captured so it looks softer than the original. Use for previews."
@@ -135,7 +136,7 @@ async function addFiles(files) {
     try {
       setStatus("Saving a safe copy of " + file.name + " inside the browser...", 0);
       const c = await Compat.stableCopy(file, (f) => setStatus("Saving a safe copy of " + file.name + "... " + Math.round(f * 100) + "%", f));
-      v.file = c.file; v.copyHow = c.how; v.cleanup = c.cleanup;
+      v.file = c.file; v.copyHow = c.how; v.cleanup = c.cleanup; v.copyName = c.name || ""; v.origType = file.type; v.origModified = file.lastModified;
     } catch (err) {
       const msg = "Could not read " + file.name + ": " + errText(err) + " Pick the file again (or copy it to your Downloads folder first).";
       setStatus(msg, 0, true); reportProblem(err, { recovered: false, stage: "add video", attempts: err.attempts, note: msg, extra: { "File": file.name, "Size (MB)": (file.size / 1048576).toFixed(1) } });
@@ -242,6 +243,7 @@ function removeVideo(v) {
   if (v.url) URL.revokeObjectURL(v.url);
   if (v.previewUrl) URL.revokeObjectURL(v.previewUrl);
   try { v.cleanup && v.cleanup(); } catch (e) { /* ignore */ }
+  if (v.copyName) { Persist.del(v.copyName).catch(() => {}); v.clips.forEach((c) => c.out && c.out.saved && Persist.delExport(c.out.saved)); }
   lib.splice(lib.indexOf(v), 1);
   if (cur === v) cur = null;
 }
@@ -803,7 +805,8 @@ function clipFileName(v, clip, ext) {
 async function exportClip(v, clip, worker, quiet) {
   worker = worker || Exporter;
   const base = readExport();
-  if (v.noPlay && base.engine === "fast") base.engine = "hq";      // the real-time recorder needs a playable video
+  if (v.noPlay && (base.engine === "fast" || base.engine === "turbo")) base.engine = "hq";      // these two need a video the browser can play
+  if (base.engine === "turbo" && !Exporter.turboAvailable()) base.engine = "hq";
   const card = $("clipList").querySelector(`.clip[data-id="${clip.id}"]`);
   const barEl = card && card.querySelector('[data-role="bar"]');
   const say = (t) => { clip.status = t; if (!clip.out) updateClipCard(clip); if (!quiet) setEStatus(t); };
@@ -815,7 +818,11 @@ async function exportClip(v, clip, worker, quiet) {
   // Recipe 0 is exactly what the user chose. Later ones drop risky extras (title picture, loudness,
   // speed change), then lower the resolution, then switch engine.
   const recipes = [{ name: "your settings", o: base }];
-  if (base.engine === "hq") {
+  if (base.engine === "turbo") {
+    recipes.push({ name: "turbo, simple options (HD 720, no title / fades / speed change)", o: Object.assign({}, base, { preset: "quick", res: "720", title: false, fade: 0, speed: 1, loud: false }) });
+    recipes.push({ name: "ffmpeg engine, quick preset, 540p", o: Object.assign({}, base, { engine: "hq", preset: "quick", res: "540", fps: "30", title: false, loud: false, fade: 0, speed: 1 }) });
+    recipes.push({ name: "lossless cut (original shape)", o: Object.assign({}, base, { engine: "copy" }) });
+  } else if (base.engine === "hq") {
     recipes.push({ name: "simple options (no title / loudness / fades, quick preset)", o: Object.assign({}, base, { preset: "quick", title: false, loud: false, fade: 0, speed: 1 }) });
     recipes.push({ name: "low resolution (540p, 30 fps, quick preset)", o: Object.assign({}, base, { preset: "quick", title: false, loud: false, fade: 0, speed: 1, res: "540", fps: "30" }) });
     recipes.push({ name: "lossless cut (original shape)", o: Object.assign({}, base, { engine: "copy" }) });
@@ -833,7 +840,9 @@ async function exportClip(v, clip, worker, quiet) {
         status: say,
         progress: (f, eta) => { if (barEl) barEl.style.width = Math.round(f * 100) + "%"; if (!quiet) $("eBar").style.width = Math.round(f * 100) + "%"; if (eta > 2 && !quiet) setEStatus((clip.status || "").split("  (")[0] + "  (about " + fmt(eta) + " left)"); }
       });
-      clip.out = { url: URL.createObjectURL(r.blob), name: clipFileName(v, clip, r.ext), size: r.blob.size, ext: r.ext };
+      clip.out = { url: URL.createObjectURL(r.blob), name: clipFileName(v, clip, r.ext), size: r.blob.size, ext: r.ext, saved: "" };
+      if (r.info) console.log("Turbo export finished:", JSON.stringify(r.info));
+      if (v.copyName) { const sn = v.copyName + "_c" + clip.id + "." + r.ext; Persist.saveExport(sn, r.blob).then(() => { if (clip.out) clip.out.saved = sn; }).catch((e) => console.warn("Could not keep the export for later:", errText(e))); }
       if (barEl) barEl.style.width = "100%";
       updateClipCard(clip); renderStats();
       if (k > 0) {
@@ -884,7 +893,9 @@ async function exportAll() {
   eCtl = { cancel: false };
   setExporting(true);
   const base = readExport();
-  const par = base.engine === "hq" ? exportWorkers(list.length) : 1;     // only the ffmpeg engine can run in parallel
+  let par = 1;       // ffmpeg engine: several engines at once; turbo: two hardware encoders at once on strong devices; others: one
+  if (base.engine === "hq") par = exportWorkers(list.length);
+  else if (base.engine === "turbo" && Exporter.turboAvailable() && !v.noPlay && (navigator.hardwareConcurrency || 4) >= 6 && (navigator.deviceMemory || 4) >= 4) par = Math.min(2, list.length);
   const pool = [Exporter];
   while (pool.length < par) { const w = Exporter.spawn(); allWorkers.push(w); pool.push(w); }
   let done = 0, finished = 0, next = 0;
@@ -1045,6 +1056,56 @@ if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)) {
 // Warn before closing the tab while an export or analysis is running.
 window.addEventListener("beforeunload", (e) => { if (exporting || analysing) { e.preventDefault(); e.returnValue = ""; } });
 
+/* ---------- LIBRARY MEMORY (js/persist.js) ----------
+   Every few seconds, changed videos are saved (name, clips, trim points...). When the page opens again
+   the library comes back by itself, with the clips and the finished files. */
+const savedJson = new Map();                         // copyName -> last saved JSON (to skip unchanged ones)
+function snapshotVideo(v) {
+  return {
+    key: v.copyName, name: v.name, type: v.origType || v.file.type, size: v.file.size, lastModified: v.origModified || v.file.lastModified,
+    duration: v.duration, w: v.w, h: v.h, noPlay: v.noPlay, codec: v.codec, thumb: v.thumb, inT: v.inT, outT: v.outT,
+    clips: v.clips.map((c) => { const o = Object.assign({}, c); delete o.out; delete o.status; return o; }),
+    outs: v.clips.filter((c) => c.out && c.out.saved).map((c) => ({ id: c.id, file: c.out.saved, name: c.out.name, size: c.out.size, ext: c.out.ext }))
+  };
+}
+setInterval(() => {
+  lib.forEach((v) => {
+    if (!v.copyName || v.deleted) return;
+    try {
+      const rec = snapshotVideo(v), j = JSON.stringify(rec);
+      if (savedJson.get(v.copyName) !== j) { savedJson.set(v.copyName, j); Persist.put(rec).catch((e) => console.warn("Could not save the library:", errText(e))); }
+    } catch (e) { /* ignore */ }
+  });
+}, 3000);
+
+async function restoreLibrary() {
+  let recs = [];
+  try { recs = await Persist.all(); } catch (e) { console.warn("No saved library:", errText(e)); }
+  const keepCopies = [], keepOuts = [];
+  for (const r of recs) {
+    try {
+      const file = await Compat.openCopy(r.key, { name: r.name, type: r.type, lastModified: r.lastModified });
+      if (file.size !== r.size) throw new Error("stored copy is incomplete");
+      const v = { id: videoSeq++, file, name: r.name, url: "", duration: r.duration, w: r.w, h: r.h, thumb: r.thumb || "", an: null, anKey: "", det: null,
+        clips: r.clips || [], inT: r.inT || 0, outT: r.outT || 0, deleted: false, noPlay: !!r.noPlay, previewUrl: "", codec: r.codec || "", copyHow: "private storage (OPFS)", copyName: r.key,
+        origType: r.type, origModified: r.lastModified, cleanup: () => Compat.cleanOld(lib.map((x) => x.copyName).filter(Boolean)) };
+      if (!v.noPlay) v.url = URL.createObjectURL(file);
+      const oldIds = v.clips.map((c) => c.id);
+      v.clips.forEach((c) => { c.out = null; c.status = ""; c.id = clipSeq++; });
+      for (const o of r.outs || []) {
+        try {
+          const f = await Persist.loadExport(o.file);
+          const idx = oldIds.indexOf(o.id);
+          if (idx >= 0) { v.clips[idx].out = { url: URL.createObjectURL(f), name: o.name, size: o.size, ext: o.ext, saved: o.file }; keepOuts.push(o.file); }
+        } catch (e) { /* that file is gone */ }
+      }
+      lib.push(v); keepCopies.push(r.key);
+    } catch (e) { console.warn("Could not restore " + r.name + ":", errText(e)); Persist.del(r.key).catch(() => {}); }
+  }
+  Compat.cleanOld(keepCopies); Persist.cleanExports(keepOuts);
+  if (lib.length) { renderLib(); renderStats(); if (!cur) selectVideo(lib[0]); toast("Restored " + lib.length + " video(s) from your last visit. Analyse again to refresh the Analysis Lab; clips and finished files are kept."); }
+}
+
 // Show unexpected errors in the status line; js/diagnostics.js also opens the full report pop-up for them.
 window.addEventListener("error", (e) => setStatus("Error: " + e.message, undefined, true));
 window.addEventListener("unhandledrejection", (e) => setStatus("Error: " + ((e.reason && e.reason.message) || e.reason), undefined, true));
@@ -1072,7 +1133,10 @@ function diagContext() {
 
 /* ---------- START-UP ---------- */
 (function init() {
-  Compat.cleanOld();        // remove stale private copies from earlier visits
+  // Older visits remembered "Best quality (ffmpeg)", which is very slow on phones. Switch once to Turbo.
+  if (store.get("engineV", 0) < 2) { store.set("engineV", 2); try { const sel = $("engineSel"); if (Exporter.turboAvailable() && sel.querySelector('option[value="turbo"]')) sel.value = "turbo"; sel.dispatchEvent(new Event("change", { bubbles: true })); } catch (e) { /* ignore */ } }
+  if (!Exporter.turboAvailable()) { const o = $("engineSel").querySelector('option[value="turbo"]'); if (o) o.remove(); if ($("engineSel").value === "turbo") $("engineSel").value = "hq"; }
+  restoreLibrary();
   if (typeof Diag !== "undefined") Diag.init(diagContext);   // error reports + pop-up
   syncUI();
   const missing = [];

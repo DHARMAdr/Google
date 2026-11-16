@@ -239,7 +239,8 @@
       <div class="wide">
         <label for="engineSel">How to make the file</label>
         <select id="engineSel" data-persist="1">
-          <option value="hq" selected>Best quality - re-encode with ffmpeg (recommended for Shorts / Reels)</option>
+          <option value="turbo" selected>Turbo - your device's hardware encoder (fast, sharp, recommended)</option>
+          <option value="hq">Best quality - re-encode with ffmpeg (very slow on phones)</option>
           <option value="copy">Original quality, instant - lossless cut, keeps the original shape</option>
           <option value="fast">Fast recorder - real time, lower quality (quick preview)</option>
         </select>
@@ -405,6 +406,7 @@
 <script src="js/diagnostics.js"></script>
 <script src="js/util.js"></script>
 <script src="js/compat.js"></script>
+<script src="js/persist.js"></script>
 <script src="js/profiles.js"></script>
 <script src="js/engine.js"></script>
 <script src="js/exporter.js"></script>

@@ -256,6 +256,182 @@ const Exporter = (function () {
   }
 
 
+
+  /* ---------- TURBO export: the device's own hardware video encoder (WebCodecs) ----------
+     WHY: ffmpeg compiled to WebAssembly runs on ONE CPU thread without special CPU instructions.
+     On a phone it encoded about 0.6 frames per second (a 30 s clip took ~30 MINUTES). Every phone and
+     PC has a dedicated video chip (hardware H.264 encoder) that does the same job at hundreds of frames
+     per second. The browser gives access to it through the WebCodecs API (VideoEncoder).
+
+     HOW IT WORKS:
+       1. A hidden <video> plays the clip once at normal speed (muted). For every picture the browser
+          shows, we paint it on a canvas in the chosen shape (blur background / fill / fit, title, fade).
+       2. Each canvas picture becomes a VideoFrame and goes to the hardware VideoEncoder.
+          The encoded H.264 pieces are packed into an MP4 by the small "mp4-muxer" library.
+       3. The sound is cut out and encoded to AAC by ffmpeg (cheap: sound only), and then joined to the
+          picture with a stream copy (no re-encoding, takes a second).
+     The clip takes about as long as its own length (it is played once), instead of 60x longer.
+
+     HOW TO IMPROVE:
+       - Decode with WebCodecs VideoDecoder too (needs an MP4 demuxer) so it can go faster than real time.
+       - Encode the sound with AudioEncoder to skip ffmpeg completely.                                    */
+  function turboAvailable() { return !!(window.VideoEncoder && window.VideoFrame); }
+
+  async function pickEncoderConfig(W, H, fps, bitrate) {
+    const tried = [];
+    for (const hw of ["prefer-hardware", "no-preference"]) {
+      for (const codec of ["avc1.64002A", "avc1.4D002A", "avc1.640033", "avc1.42002A"]) {      // High / Main / High 5.1 / Baseline, level 4.2
+        const cfg = { codec, width: W, height: H, bitrate: Math.round(bitrate), framerate: fps, hardwareAcceleration: hw, latencyMode: "quality", avc: { format: "avc" } };
+        try { const r = await VideoEncoder.isConfigSupported(cfg); if (r.supported) return { cfg: r.config || cfg, hw, codec }; tried.push(codec + "/" + hw + ": no"); }
+        catch (e) { tried.push(codec + "/" + hw + ": " + errText(e)); }
+      }
+    }
+    throw new Error("This device has no usable H.264 hardware encoder (" + tried.slice(0, 3).join("; ") + ").");
+  }
+
+  // Paint one video picture in the chosen shape. `small` is a tiny canvas used to make a cheap blurred background.
+  function paintFrame(g, small, sg, vid, W, H, o) {
+    const vw = vid.videoWidth, vh = vid.videoHeight;
+    if (o.shape === "original") { g.drawImage(vid, 0, 0, W, H); return; }
+    if (o.fit === "fill") {
+      const sc = Math.max(W / vw, H / vh), dw = vw * sc, dh = vh * sc;
+      g.drawImage(vid, (W - dw) * (o.posX ?? 0.5), (H - dh) * (o.posY ?? 0.5), dw, dh); return;
+    }
+    if (o.fit === "blur") {
+      const sc = Math.max(small.width / vw, small.height / vh);
+      sg.drawImage(vid, (small.width - vw * sc) / 2, (small.height - vh * sc) / 2, vw * sc, vh * sc);   // tiny copy ...
+      g.imageSmoothingEnabled = true; g.imageSmoothingQuality = "high";
+      g.drawImage(small, 0, 0, W, H);                                                                    // ... blown up = blur
+      g.fillStyle = "rgba(0,0,0,.3)"; g.fillRect(0, 0, W, H);
+    } else { g.fillStyle = "#000"; g.fillRect(0, 0, W, H); }
+    const sf = Math.min(W / vw, H / vh);
+    g.imageSmoothingQuality = "high";
+    g.drawImage(vid, (W - vw * sf) / 2, (H - vh * sf) / 2, vw * sf, vh * sf);
+  }
+
+  async function turboAudio(v, clip, o, onStatus) {
+    // Returns an .m4a (AAC) file for this clip, or null when the video has no sound.
+    await loadEngine(onStatus);
+    const src = await mountVideo(v);
+    const dur = clip.end - clip.start, speed = o.speed || 1, outDur = dur / speed, af = [];
+    if (speed !== 1) af.push("atempo=" + speed);
+    if (o.loud) af.push("loudnorm=I=-14:TP=-1.5:LRA=11");
+    if (o.fade > 0) { const f = Math.min(o.fade, outDur / 3); af.push("afade=t=in:st=0:d=" + f, "afade=t=out:st=" + Math.max(0, outDur - f).toFixed(3) + ":d=" + f); }
+    const args = ["-hide_banner", "-ss", clip.start.toFixed(3), "-t", dur.toFixed(3), "-i", src.path, "-vn", "-map", "0:a:0"];
+    if (af.length) args.push("-af", af.join(","));
+    args.push("-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "/a.m4a");
+    const code = await ff.exec(args);
+    if (code !== 0) return null;
+    return ff;
+  }
+
+  async function exportTurbo(v, clip, o, onProgress, onStatus) {
+    cancelled = false;
+    if (!turboAvailable()) throw new Error("Turbo export needs a browser with WebCodecs (Chrome / Edge). Use 'Best quality' instead.");
+    if (v.noPlay || !v.url) throw new Error("Turbo export needs a video the browser can play.");
+    const speed = o.speed || 1, dur = clip.end - clip.start, outDur = dur / speed;
+    const [W, H] = outSize(o, v.w, v.h);
+    const fixedFps = o.fps && o.fps !== "src" ? +o.fps : 0;
+    const encFps = fixedFps || 30;
+    const bpp = { max: 0.2, high: 0.14, quick: 0.09 }[o.preset] || 0.14;
+    const bitrate = clamp(W * H * encFps * bpp, 2e6, 40e6);
+    const t0 = performance.now();
+
+    onStatus && onStatus("Starting the hardware encoder...");
+    const { cfg, hw } = await pickEncoderConfig(W, H, encFps, bitrate);
+    const mod = await import(new URL("vendor/mp4-muxer/mp4-muxer.mjs", document.baseURI).href);
+    const muxer = new mod.Muxer({ target: new mod.ArrayBufferTarget(), video: { codec: "avc", width: W, height: H }, fastStart: "in-memory", firstTimestampBehavior: "offset" });
+    let encErr = null;
+    const enc = new VideoEncoder({ output: (chunk, meta) => { try { muxer.addVideoChunk(chunk, meta); } catch (e) { encErr = e; } }, error: (e) => { encErr = e; } });
+    enc.configure(cfg);
+
+    // Sound is prepared at the same time (it runs in ffmpeg's own thread).
+    const audioP = o.mute ? Promise.resolve(null) : turboAudio(v, clip, o, onStatus).catch((e) => { console.warn("Turbo: sound step failed, video only:", e); return null; });
+
+    // Canvases and the hidden video.
+    const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
+    const g = cv.getContext("2d", { alpha: false });
+    const small = document.createElement("canvas"); small.width = even(W / 12); small.height = even(H / 12);
+    const sg = small.getContext("2d", { alpha: false });
+    const vid = document.createElement("video");
+    vid.muted = true; vid.defaultMuted = true; vid.playsInline = true; vid.preload = "auto"; vid.setAttribute("playsinline", ""); vid.setAttribute("muted", "");
+    const box = document.createElement("div");
+    box.style.cssText = "position:fixed;right:0;bottom:0;width:2px;height:2px;overflow:hidden;opacity:0.02;pointer-events:none;z-index:-1";
+    vid.style.cssText = "width:2px;height:2px"; box.appendChild(vid); document.body.appendChild(box);
+    vid.src = v.url;
+    let count = 0, lastOut = -1;
+    try {
+      await new Promise((res, rej) => { const to = setTimeout(() => rej(new Error("The video header did not load.")), 25000); vid.onloadedmetadata = () => { clearTimeout(to); res(); }; vid.onerror = () => { clearTimeout(to); rej(new Error("The browser cannot open this video.")); }; vid.load(); });
+      await seekTo(vid, Math.max(0, clip.start));
+      vid.playbackRate = speed;
+      onStatus && onStatus("Encoding with the " + (hw === "prefer-hardware" ? "hardware" : "software") + " H.264 encoder (plays once, about the clip's own length)...");
+      await new Promise((resolve, reject) => {
+        let lastCb = performance.now(), done = false;
+        const watch = setInterval(() => {
+          if (cancelled) { finish(new Error("cancelled")); return; }
+          if (document.hidden) { lastCb = performance.now(); return; }
+          if (vid.paused && !vid.ended && enc.encodeQueueSize < 3) vid.play().catch(() => {});
+          if (performance.now() - lastCb > 15000) finish(new Error("Video playback stalled during export (no pictures for 15 s)."));
+        }, 1000);
+        function finish(err) { if (done) return; done = true; clearInterval(watch); err ? reject(err) : resolve(); }
+        function cb(now, meta) {
+          if (done) return;
+          lastCb = performance.now();
+          if (encErr) return finish(encErr);
+          const mt = meta.mediaTime;
+          if (mt >= clip.end - 0.0005) return finish();
+          vid.requestVideoFrameCallback(cb);
+          if (mt < clip.start - 0.002) return;
+          const outT = (mt - clip.start) / speed;
+          if (fixedFps && outT < lastOut + 1 / fixedFps - 0.004) return;                       // keep only the frames needed for the chosen fps
+          try {
+            paintFrame(g, small, sg, vid, W, H, o);
+            if (o.fade > 0) {
+              const f = Math.min(o.fade, outDur / 3), a = outT < f ? 1 - outT / f : outT > outDur - f ? 1 - (outDur - outT) / f : 0;
+              if (a > 0) { g.fillStyle = "rgba(0,0,0," + Math.min(1, a) + ")"; g.fillRect(0, 0, W, H); }
+            }
+            if (o.title && clip.label && (!(o.titleSecs > 0) || outT <= o.titleSecs)) drawTitleOn(g, clip.label, W, H);
+            const frame = new VideoFrame(cv, { timestamp: Math.round(outT * 1e6) });
+            enc.encode(frame, { keyFrame: count % (encFps * 2) === 0 });
+            frame.close(); count++; lastOut = outT;
+            if (count % 8 === 0) { const f = Math.min(1, outT / outDur), el = (performance.now() - t0) / 1000; onProgress && onProgress(0.9 * f, f > 0.03 ? (el / f - el) : 0); }
+            // If the encoder falls behind, pause the video until it catches up (no frames are lost).
+            if (enc.encodeQueueSize > 12) { vid.pause(); const back = () => { if (enc.encodeQueueSize <= 3) { enc.removeEventListener("dequeue", back); vid.play().catch(() => {}); } }; enc.addEventListener("dequeue", back); }
+          } catch (e) { finish(e); }
+        }
+        vid.addEventListener("ended", () => finish());
+        vid.requestVideoFrameCallback(cb);
+        vid.play().catch((e) => finish(e));
+      });
+      if (cancelled) throw new Error("cancelled");
+      await enc.flush();
+      if (encErr) throw encErr;
+      if (!count) throw new Error("No pictures were produced (the clip may be outside the video).");
+    } finally {
+      try { vid.pause(); vid.removeAttribute("src"); vid.load(); } catch (e) { /* ignore */ }
+      try { box.remove(); } catch (e) { /* ignore */ }
+      try { enc.state !== "closed" && enc.close(); } catch (e) { /* ignore */ }
+    }
+    muxer.finalize();
+    let bytes = new Uint8Array(muxer.target.buffer);
+
+    // Join the sound (stream copy: no quality loss, about a second).
+    onProgress && onProgress(0.93, 0);
+    const audioFF = await audioP;
+    if (cancelled) throw new Error("cancelled");
+    if (audioFF) {
+      try {
+        onStatus && onStatus("Adding the sound...");
+        await ff.writeFile("/v.mp4", bytes);
+        const code = await ff.exec(["-hide_banner", "-i", "/v.mp4", "-i", "/a.m4a", "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-shortest", "-movflags", "+faststart", "/out.mp4"]);
+        if (code === 0) bytes = await ff.readFile("/out.mp4");
+        for (const f of ["/v.mp4", "/a.m4a", "/out.mp4"]) { try { await ff.deleteFile(f); } catch (e) { /* ignore */ } }
+      } catch (e) { console.warn("Turbo: joining sound failed, video only:", e); }
+    }
+    onProgress && onProgress(1, 0);
+    return { blob: new Blob([bytes], { type: "video/mp4" }), ext: "mp4", info: { frames: count, hw, seconds: (performance.now() - t0) / 1000 } };
+  }
+
   /* ---------- SELF-HEALING HELPERS (used by engine.js when the browser cannot read pixels) ----------
      WHY: if the browser refuses to let the page read pixels from a <video> (a "tainted canvas"),
      we do not need the browser at all. ffmpeg can decode the file itself and hand us the raw
@@ -499,11 +675,12 @@ const Exporter = (function () {
   /* ---------- the one function the site calls ---------- */
   async function exportClip(v, clip, o, handlers) {
     const h = handlers || {};
+    if (o.engine === "turbo") return exportTurbo(v, clip, o, h.progress, h.status);
     if (o.engine === "fast") return exportFast(v, clip, o, h.progress, h.status, h.ctl || {}, h.hiddenVideo);
     return exportFF(v, clip, o, h.progress, h.status);
   }
 
-  return { exportClip, cancel, unmountVideo, makeZip, outSize, loadEngine, extractFrames, decodeAudioPCM, getLog, probeInfo, makeProxy, thumbFF };
+  return { exportClip, cancel, unmountVideo, makeZip, outSize, loadEngine, extractFrames, decodeAudioPCM, getLog, probeInfo, makeProxy, thumbFF, turboAvailable };
   }
   const main = make();
   main.spawn = make;

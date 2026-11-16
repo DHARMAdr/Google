@@ -129,6 +129,14 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 - **Parallel export**: `Exporter` is now a factory (`make`, `Exporter.spawn()`); `exportAll` runs up to 3 ffmpeg engines at once (by cores/RAM). Output size never upscales small sources (min of chosen size and max(720, source)).
 - Fixed report-dialog bug (`e.currentTarget` null after await). Version 3.3.0, SW cache v6.
 
+## 9e. Turbo export, keep-alive, memory (Round 7)
+
+- **Turbo engine** (`exporter.js exportTurbo`): hidden <video> plays the clip once; each picture is painted on a canvas (blur/fill/fit, title, fades) -> `VideoFrame` -> hardware `VideoEncoder` (H.264 High 4.2, bitrate = pixels x fps x 0.09/0.14/0.2 by preset) -> `vendor/mp4-muxer` (MIT, v5.2.2) -> MP4. Sound: ffmpeg cuts + AAC-encodes the clip's audio only, then a stream-copy join. Takes about the clip's own length. Two clips at once on strong devices (>=6 cores, >=4 GB). Falls back: turbo simple 720p -> ffmpeg quick 540p -> lossless cut.
+- Why: the ffmpeg.wasm x264 encode ran at 0.6 fps on the user's Pixel (0.019x speed): one 33 s clip took ~30 min.
+- **Keep-alive** (`compat.js keepAwake`): screen wake lock + Web Lock + near-silent looping audio + Media Session card, so work continues when the tab/app is switched or the screen is off. A website cannot run after the browser is closed.
+- **Memory between visits** (`persist.js`): IndexedDB records + private copies/exports in OPFS; the library, clips and finished files come back after a reload. Analysis Lab data is not saved (analyse again).
+- Engine default migrated once to Turbo. Version 4.0.0, SW cache v7.
+
 ## 10. Future upgrades (ideas, biggest value first)
 
 1. **OCR of the kill feed** (tesseract.js) to keep only the player's own kills by name.
@@ -187,3 +195,9 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 - Added stream reader + parallel parts + device-based worker count, parallel export, no-upscale size cap, fixes above.
 - Measured here (desktop Chrome): 280 s clip analysis 53 s with seek vs 17.6 s with 3 parallel stream parts (same kills). Export of 3 clips (quick preset): 145 s with 1 engine, 97 s with 3 (sandbox has few cores). Taint/AVI/HEVC recovery tests still pass.
 - Not verified on the real phone. Biggest remaining cost: x264 in WebAssembly (single thread per engine). Next idea: WebCodecs hardware encoder.
+
+### Round 7 - Turbo export + background + memory (2026-11-16)
+- User report (Pixel): analysis worked (stream x3) but ffmpeg export ran at 0.019x for ~1 hour. Asked for much faster use of device hardware, background running, push + files.
+- Added Turbo (hardware) export, keep-alive, persistent library. Measured here (desktop Chrome, software encoder): 12.9 s clip -> 13.4 s, 1080x1920 H.264 + AAC; 3 clips 25 s (ffmpeg engine: 97-145 s). Library restored after reload. Earlier recovery/format tests pass.
+- Not verifiable here: real phone speed (hardware encoder should be faster than this test), Android background behaviour.
+- Needs a server to truly run with the app closed (options in chat: cloud worker, or always-on PC).
