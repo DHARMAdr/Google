@@ -43,6 +43,7 @@
   </nav>
   <div class="tools">
     <button class="ghost small" id="installBtn" hidden>Install app</button>
+    <button class="ghost small" id="cloudBtn" title="Optional: render on your own server">Cloud <span class="badge" id="cloudDot" hidden>on</span></button>
     <button class="ghost small" id="reportBtn" title="Open the last error report, or run a quick system check">Report <span class="badge" id="reportBadge" hidden>0</span></button>
     <button class="ghost small" id="themeBtn" title="Switch light / dark">Theme</button>
   </div>
@@ -387,6 +388,26 @@
   </div>
 </dialog>
 
+<!-- ======================= CLOUD SERVER DIALOG (js/cloud.js, server code in /server) ======================= -->
+<dialog id="cloudDlg">
+  <h3 style="margin:0 0 6px">Cloud server (optional)</h3>
+  <p class="muted small" style="margin:0 0 8px">Connect your own ClipCutter server (see the <b>server</b> folder, runs behind your Cloudflare). A video is sent there only when you choose <b>Cloud server</b> as the export engine. It renders with real ffmpeg, keeps going if you close this page, and the video and its clips are <b>deleted from the server automatically when you delete the video here</b>.</p>
+  <label for="cloudUrl">Server address (https://...)</label>
+  <input id="cloudUrl" type="url" placeholder="https://clips.yourname.workers.dev" autocomplete="off" spellcheck="false">
+  <label for="cloudBackup">Backup / proxy address (optional, the faster one is used, the other is the fallback)</label>
+  <input id="cloudBackup" type="url" placeholder="https://your-proxy.example.com" autocomplete="off" spellcheck="false">
+  <label for="cloudToken">Access token (the TOKEN you set on the server)</label>
+  <input id="cloudToken" type="password" placeholder="secret token" autocomplete="off" spellcheck="false">
+  <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input type="checkbox" id="cloudAuto" style="width:auto"> Upload every new video automatically (otherwise only when I export with the Cloud engine)</label>
+  <div id="cloudMsg" class="small" style="margin:10px 0;white-space:pre-wrap"></div>
+  <div class="row">
+    <button id="cloudSave">Save</button>
+    <button class="ghost" id="cloudTest">Test connection</button>
+    <button class="danger" id="cloudPurge">Delete everything on the server</button>
+    <button class="ghost" id="cloudClose">Close</button>
+  </div>
+</dialog>
+
 <!-- ======================= ERROR REPORT DIALOG (filled in by js/diagnostics.js) ======================= -->
 <dialog id="errDlg">
   <h3 id="errTitle" style="margin:0 0 6px">Error report</h3>
@@ -407,6 +428,7 @@
 <script src="js/util.js"></script>
 <script src="js/compat.js"></script>
 <script src="js/persist.js"></script>
+<script src="js/cloud.js"></script>
 <script src="js/profiles.js"></script>
 <script src="js/engine.js"></script>
 <script src="js/exporter.js"></script>

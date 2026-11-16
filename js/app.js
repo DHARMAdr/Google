@@ -97,12 +97,13 @@ function syncUI() {
   $("sensVal").textContent = (parseFloat($("sensSel").value) || 1).toFixed(1);
 
   const eng = $("engineSel").value;
-  document.querySelectorAll(".hq-only").forEach((e) => (e.hidden = eng !== "hq" && eng !== "turbo"));
+  document.querySelectorAll(".hq-only").forEach((e) => (e.hidden = eng !== "hq" && eng !== "turbo" && eng !== "cloud"));
   document.querySelectorAll(".shape-only").forEach((e) => {
     e.style.opacity = eng === "copy" ? 0.4 : 1;
     e.querySelectorAll("select,input").forEach((i) => (i.disabled = eng === "copy"));
   });
   $("engineHint").textContent = {
+    cloud: "Sends the video once to YOUR server, which renders the clips with real ffmpeg (fast, high quality) and keeps going even if you close this page. Open the site later and the finished clips download by themselves. Deleting the video here also deletes it from the server. If the server cannot be reached, the clips are rendered on this device instead.",
     turbo: "Uses the video chip of your phone / PC (hardware H.264 encoder). The clip is played once while it is encoded, so it takes about as long as the clip itself instead of minutes or hours. Sharp picture, your chosen shape, title, fades and sound. If the device has no hardware encoder it falls back to the ffmpeg engine by itself.",
     hq: "Real H.264 encoding with ffmpeg: sharp picture, original frame rate, no dropped frames. It is slower than the clip itself (a 30 s Full HD clip can take a few minutes), and the tab should stay open. 'Quick' is the fastest, 'Maximum' the sharpest.",
     copy: "Instant and lossless: the file is cut without touching the picture. It keeps the original shape (no 9:16 crop), and the start can be up to ~2 s early because cuts happen at keyframes.",
@@ -163,6 +164,13 @@ async function addFiles(files) {
     }
     v.outT = Math.min(30, v.duration);
     lib.push(v);
+    if (Cloud.enabled() && Cloud.getConfig().auto) {            // optional: send it to the server in the background
+      Compat.keepAwake(true);
+      Cloud.upload(v, (f) => setStatus("Sending " + v.name + " to your server... " + Math.round(f * 100) + "%", f), { cancel: false })
+        .then(() => { setStatus(v.name + " is on your server.", 1); renderLib(); })
+        .catch((e) => { setStatus("Upload to the server failed: " + errText(e), 0, true); reportProblem(e, { recovered: "partial", stage: "cloud upload", show: "toast" }); })
+        .finally(() => Compat.keepAwake(false));
+    }
     renderLib(); renderStats();
     if (!cur) selectVideo(v);
     setStatus("Added " + file.name + (v.copyHow ? " (safe copy: " + v.copyHow + ")" : "") + ".", 0);
@@ -201,7 +209,7 @@ function renderLib() {
         ${v.thumb ? `<img src="${v.thumb}" alt="">` : `<div class="thumb-ph"></div>`}
         <div style="min-width:0">
           <div class="name">${esc(v.name)}</div>
-          <div class="sub">${fmt(v.duration)} | ${v.w}x${v.h} | ${(v.file.size / 1048576).toFixed(1)} MB | ${v.clips.length} clip(s)${v.an ? " | analysed" : ""}${kills ? " | " + kills + " kill(s)" : ""}</div>
+          <div class="sub">${fmt(v.duration)} | ${v.w}x${v.h} | ${(v.file.size / 1048576).toFixed(1)} MB | ${v.clips.length} clip(s)${v.an ? " | analysed" : ""}${v.remote ? (v.remote.complete ? " | on your server" : " | uploading...") : ""}${kills ? " | " + kills + " kill(s)" : ""}</div>
         </div>
       </div>
       <div class="row">
@@ -243,6 +251,7 @@ function removeVideo(v) {
   if (v.url) URL.revokeObjectURL(v.url);
   if (v.previewUrl) URL.revokeObjectURL(v.previewUrl);
   try { v.cleanup && v.cleanup(); } catch (e) { /* ignore */ }
+  Cloud.remove(v).then((ok) => { if (!ok && Cloud.pendingDeletes().length) toast("The server could not be reached; the video will be deleted from it automatically later."); });
   if (v.copyName) { Persist.del(v.copyName).catch(() => {}); v.clips.forEach((c) => c.out && c.out.saved && Persist.delExport(c.out.saved)); }
   lib.splice(lib.indexOf(v), 1);
   if (cur === v) cur = null;
@@ -451,6 +460,7 @@ async function doAnalyse(v) {
   const P = readParams(), classic = P.method === "classic";
   const key = analysisKey(P);
   if (v.an && (v.anKey === key || classic)) return true;           // already done: reuse it
+  if (!(await ensureFile(v))) { setAState(FILE_GONE, 0, true); reportProblem(new Error(FILE_GONE), { recovered: false, stage: "analyse" }); return false; }
 
   const prof = PROFILES[P.profile];
   const fps = classic ? 1 : P.fps;
@@ -801,6 +811,24 @@ function clipFileName(v, clip, ext) {
   return slug(v.name.replace(/\.[^.]+$/, "")) + "_" + String(clip.rank || idx).padStart(2, "0") + "_" + slug(clip.label) + "." + ext;
 }
 
+// Make sure the video's stored file can still be read. If another window removed it, try to open it again from private
+// storage; if it is truly gone, say so clearly (instead of 4 confusing retries).
+async function ensureFile(v) {
+  if (await Compat.readable(v.file)) return true;
+  if (v.copyName) {
+    try {
+      const f = await Compat.openCopy(v.copyName, { name: v.name, type: v.origType || v.file.type, lastModified: v.origModified || v.file.lastModified });
+      if (await Compat.readable(f)) {
+        v.file = f; try { Exporter.unmountVideo(v); } catch (e) { /* ignore */ }
+        if (v.url) { URL.revokeObjectURL(v.url); v.url = URL.createObjectURL(f); }
+        return true;
+      }
+    } catch (e) { /* gone */ }
+  }
+  return false;
+}
+const FILE_GONE = "The stored copy of this video is no longer available (another window of the site may have cleaned it, or the browser freed the space). Please add the video again.";
+
 // Export ONE clip. Returns true when finished, false if cancelled or failed.
 async function exportClip(v, clip, worker, quiet) {
   worker = worker || Exporter;
@@ -810,9 +838,15 @@ async function exportClip(v, clip, worker, quiet) {
   const card = $("clipList").querySelector(`.clip[data-id="${clip.id}"]`);
   const barEl = card && card.querySelector('[data-role="bar"]');
   const say = (t) => { clip.status = t; if (!clip.out) updateClipCard(clip); if (!quiet) setEStatus(t); };
+  if (base.engine === "cloud") base.engine = Exporter.turboAvailable() && !v.noPlay ? "turbo" : "hq";     // server unavailable or not used: render here
   if (clip.out) { URL.revokeObjectURL(clip.out.url); clip.out = null; }
   if (barEl) barEl.style.width = "0%";
   say("Preparing...");
+  if (!(await ensureFile(v))) {
+    clip.status = "Failed: " + FILE_GONE; setEStatus(FILE_GONE, 0, true); updateClipCard(clip);
+    reportProblem(new Error(FILE_GONE), { recovered: false, stage: "export", note: "The stored video file could not be read before export started." });
+    return false;
+  }
 
   // SELF-HEALING EXPORT: if the chosen settings fail, we try simpler recipes one after another.
   // Recipe 0 is exactly what the user chose. Later ones drop risky extras (title picture, loudness,
@@ -855,9 +889,10 @@ async function exportClip(v, clip, worker, quiet) {
     } catch (err) {
       if (err.message === "cancelled" || (eCtl && eCtl.cancel)) { clip.status = "Cancelled."; setEStatus("Export cancelled.", 0); updateClipCard(clip); if (barEl) barEl.style.width = "0%"; return false; }
       console.error(err);
-      attempts.push({ step: "export", strategy: rcp.name, ok: false, error: (err.name || "Error") + ": " + err.message, ms: Math.round(performance.now() - s0) });
+      attempts.push({ step: "export", strategy: rcp.name, ok: false, error: errText(err), ms: Math.round(performance.now() - s0) });
+      if (/NotFoundError|NotReadableError|could not be found/i.test(errText(err))) { k = recipes.length - 1; err = new Error(FILE_GONE + " (" + errText(err) + ")"); }      // retrying with other settings cannot help
       if (k === recipes.length - 1) {
-        clip.status = "Failed: " + err.message; setEStatus("Export failed: " + err.message + " - a full report was opened.", 0, true);
+        clip.status = "Failed: " + errText(err); setEStatus("Export failed: " + errText(err) + " - a full report was opened.", 0, true);
         updateClipCard(clip); if (barEl) barEl.style.width = "0%";
         reportProblem(err, { recovered: false, stage: "export", attempts });
         return false;
@@ -870,11 +905,91 @@ async function exportClip(v, clip, worker, quiet) {
 async function exportOne(clip) {
   if (exporting) return;
   const v = cur;
+  if (readExport().engine === "cloud" && Cloud.enabled()) { const n = await exportCloud(v, [clip]); if (n) toast("Clip rendered on your server."); return; }
   eCtl = { cancel: false };
   setExporting(true);
   const ok = await exportClip(v, clip);
   setExporting(false);
   if (ok) { setEStatus("Export finished. Download it from the clip card.", 1); toast("Clip exported."); }
+}
+
+/* ---------- CLOUD SERVER EXPORT (js/cloud.js + /server) ---------- */
+function refreshCloudUI() {
+  const on = Cloud.enabled(), sel = $("engineSel");
+  let opt = sel.querySelector('option[value="cloud"]');
+  if (on && !opt) { opt = document.createElement("option"); opt.value = "cloud"; opt.textContent = "Cloud server - renders on your server, keeps going if you close the page"; sel.appendChild(opt); }
+  if (!on && opt) { if (sel.value === "cloud") sel.value = Exporter.turboAvailable() ? "turbo" : "hq"; opt.remove(); }
+  $("cloudDot").hidden = !on;
+  syncUI();
+}
+
+// Keep asking the server about this video's clips; download each one as soon as it is finished.
+async function pollCloud(v, ui) {
+  if (v.polling) return;
+  v.polling = true;
+  try {
+    while (!v.deleted && v.remote && v.remote.pending && v.remote.pending.length && !(ui && eCtl.cancel)) {
+      let st;
+      try { st = await Cloud.jobs(v); }
+      catch (e) { if (e.status === 404) { v.remote = null; throw new Error("The server no longer has this video (it may have been cleared)."); } throw e; }
+      for (const id of [...v.remote.pending]) {
+        const clip = v.clips.find((c) => c.id === id), j = st.jobs[id];
+        if (!clip) { v.remote.pending = v.remote.pending.filter((x) => x !== id); continue; }
+        const card = $("clipList").querySelector(`.clip[data-id="${clip.id}"]`), bar = card && card.querySelector('[data-role="bar"]');
+        if (!j || j.status === "cancelled") { clip.status = "Cancelled on the server."; v.remote.pending = v.remote.pending.filter((x) => x !== id); updateClipCard(clip); continue; }
+        if (j.status === "error") { clip.status = "Server error: " + j.error; v.remote.pending = v.remote.pending.filter((x) => x !== id); updateClipCard(clip); reportProblem(new Error(j.error), { recovered: false, stage: "cloud render", extra: { "Clip": clip.label || clip.id } }); continue; }
+        if (j.status === "done") {
+          clip.status = "Downloading from the server...";
+          const blob = await Cloud.download(v, String(id), j.size, (f) => { if (bar) bar.style.width = Math.round(f * 100) + "%"; });
+          if (clip.out) URL.revokeObjectURL(clip.out.url);
+          clip.out = { url: URL.createObjectURL(blob), name: clipFileName(v, clip, "mp4"), size: blob.size, ext: "mp4", saved: "" };
+          if (v.copyName) { const sn = v.copyName + "_c" + clip.id + ".mp4"; Persist.saveExport(sn, blob).then(() => { if (clip.out) clip.out.saved = sn; }).catch(() => {}); }
+          clip.status = "Done (rendered on your server)."; v.remote.pending = v.remote.pending.filter((x) => x !== id);
+          if (bar) bar.style.width = "100%"; updateClipCard(clip); renderStats();
+          continue;
+        }
+        clip.status = j.status === "running" ? "Rendering on your server... " + Math.round((j.progress || 0) * 100) + "%" : "Waiting in the server queue...";
+        if (bar && j.status === "running") bar.style.width = Math.round((j.progress || 0) * 100) + "%";
+        updateClipCard(clip);
+      }
+      if (ui) { const left = v.remote.pending.length; setEStatus("Server is rendering. " + left + " clip(s) left. You can close this page; reopen it later and the finished clips download by themselves.", 0.5); }
+      if (v.remote.pending.length) await new Promise((r) => setTimeout(r, 2500));
+    }
+  } finally { v.polling = false; }
+}
+
+async function exportCloud(v, list) {
+  eCtl = { cancel: false };
+  setExporting(true);
+  const o = readExport(); o.engine = "cloud";
+  let done = 0;
+  try {
+    if (!(await ensureFile(v))) throw new Error(FILE_GONE);
+    // 1. send the video (only the first time; later exports reuse it)
+    if (!(v.remote && v.remote.complete)) setEStatus("Sending " + v.name + " to your server...", 0);
+    await Cloud.upload(v, (f, eta) => setEStatus("Sending " + v.name + " to your server... " + Math.round(f * 100) + "%" + (eta > 3 ? " (about " + fmt(eta) + " left)" : ""), f * 0.5), eCtl);
+    // 2. ask for the clips
+    list.forEach((c) => { if (c.out) { URL.revokeObjectURL(c.out.url); c.out = null; } c.status = "Waiting in the server queue..."; updateClipCard(c); });
+    await Cloud.submit(v, list, o);
+    v.remote.pending = list.map((c) => c.id);
+    // 3. wait + download
+    await pollCloud(v, true);
+    done = list.filter((c) => c.out).length;
+    if (eCtl.cancel) { try { await Cloud.cancelJobs(v); } catch (e) { /* ignore */ } if (v.remote) v.remote.pending = []; setEStatus("Cancelled.", 0); }
+    else setEStatus(done + " of " + list.length + " clips rendered on your server and downloaded.", 1);
+  } catch (err) {
+    if (err.message === "cancelled" || eCtl.cancel) { setEStatus("Cancelled.", 0); setExporting(false); return done; }
+    // FALLBACK: never leave the user stuck. Render the unfinished clips on this device.
+    console.error(err);
+    const rest = list.filter((c) => !c.out);
+    reportProblem(err, { recovered: "partial", stage: "cloud export", note: "The server could not finish. The remaining " + rest.length + " clip(s) were rendered on this device instead." });
+    toast("Server problem: " + errText(err) + " Rendering on this device instead.", true);
+    if (v.remote) v.remote.pending = [];
+    for (const c of rest) { if (v.deleted || eCtl.cancel) break; if (await exportClip(v, c, null, false)) done++; }
+    setEStatus(done + " of " + list.length + " clips exported (some on this device).", 1);
+  }
+  setExporting(false);
+  return done;
 }
 
 // How many clips can be exported at the same time on THIS device (each needs its own ffmpeg engine).
@@ -890,6 +1005,7 @@ const allWorkers = [];                              // every extra export engine
 async function exportAll() {
   if (exporting || !cur || !cur.clips.length) return 0;
   const v = cur, list = [...v.clips];
+  if (readExport().engine === "cloud" && Cloud.enabled()) return exportCloud(v, list);
   eCtl = { cancel: false };
   setExporting(true);
   const base = readExport();
@@ -1064,6 +1180,7 @@ function snapshotVideo(v) {
   return {
     key: v.copyName, name: v.name, type: v.origType || v.file.type, size: v.file.size, lastModified: v.origModified || v.file.lastModified,
     duration: v.duration, w: v.w, h: v.h, noPlay: v.noPlay, codec: v.codec, thumb: v.thumb, inT: v.inT, outT: v.outT,
+    remote: v.remote ? { id: v.remote.id, complete: !!v.remote.complete, pending: v.remote.pending || [] } : null,
     clips: v.clips.map((c) => { const o = Object.assign({}, c); delete o.out; delete o.status; return o; }),
     outs: v.clips.filter((c) => c.out && c.out.saved).map((c) => ({ id: c.id, file: c.out.saved, name: c.out.name, size: c.out.size, ext: c.out.ext }))
   };
@@ -1090,8 +1207,10 @@ async function restoreLibrary() {
         clips: r.clips || [], inT: r.inT || 0, outT: r.outT || 0, deleted: false, noPlay: !!r.noPlay, previewUrl: "", codec: r.codec || "", copyHow: "private storage (OPFS)", copyName: r.key,
         origType: r.type, origModified: r.lastModified, cleanup: () => Compat.cleanOld(lib.map((x) => x.copyName).filter(Boolean)) };
       if (!v.noPlay) v.url = URL.createObjectURL(file);
+      v.remote = r.remote || null;
       const oldIds = v.clips.map((c) => c.id);
-      v.clips.forEach((c) => { c.out = null; c.status = ""; c.id = clipSeq++; });
+      v.clips.forEach((c) => { c.out = null; c.status = ""; });      // ids are kept: the server knows the clips by id
+      clipSeq = Math.max(clipSeq, ...oldIds.map((n) => +n + 1 || 0), 1);
       for (const o of r.outs || []) {
         try {
           const f = await Persist.loadExport(o.file);
@@ -1103,8 +1222,37 @@ async function restoreLibrary() {
     } catch (e) { console.warn("Could not restore " + r.name + ":", errText(e)); Persist.del(r.key).catch(() => {}); }
   }
   Compat.cleanOld(keepCopies); Persist.cleanExports(keepOuts);
+  // Videos that were being rendered on the server when the page closed: pick the results up now.
+  if (Cloud.enabled()) for (const v of lib) if (v.remote && v.remote.pending && v.remote.pending.length) { setEStatus("Collecting clips your server rendered while the page was closed...", 0.3); pollCloud(v, false).then(() => setEStatus("Server clips collected.", 1)).catch((e) => { setEStatus("Could not collect server clips: " + errText(e), 0, true); }); }
   if (lib.length) { renderLib(); renderStats(); if (!cur) selectVideo(lib[0]); toast("Restored " + lib.length + " video(s) from your last visit. Analyse again to refresh the Analysis Lab; clips and finished files are kept."); }
 }
+
+/* ---------- cloud dialog ---------- */
+(function cloudDialog() {
+  const dlg = $("cloudDlg"), msg = (t, bad) => { $("cloudMsg").textContent = t; $("cloudMsg").style.color = bad ? "var(--danger)" : "var(--text)"; };
+  $("cloudBtn").addEventListener("click", () => {
+    const c = Cloud.getConfig(); $("cloudUrl").value = c.url; $("cloudBackup").value = c.backup; $("cloudToken").value = c.token; $("cloudAuto").checked = !!c.auto;
+    const n = Cloud.pendingDeletes().length; msg(n ? n + " server delete(s) are waiting to be retried automatically." : "");
+    dlg.showModal();
+  });
+  const read = () => ({ url: $("cloudUrl").value.trim(), backup: $("cloudBackup").value.trim(), token: $("cloudToken").value.trim(), auto: $("cloudAuto").checked });
+  $("cloudSave").addEventListener("click", () => { Cloud.setConfig(read()); refreshCloudUI(); msg(Cloud.enabled() ? "Saved. Press 'Test connection' to check it." : "Saved. The cloud server is OFF (address or token missing)."); Cloud.flushDeletes(); });
+  $("cloudTest").addEventListener("click", async () => {
+    Cloud.setConfig(read()); refreshCloudUI();
+    if (!Cloud.enabled()) return msg("Enter the server address and the token first.", true);
+    msg("Testing...");
+    const r = await Cloud.test();
+    const lines = r.results.map((x) => (x.ok ? "OK   " : "FAIL ") + x.base + (x.ms ? "  (" + x.ms + " ms)" : "") + (x.error ? "  - " + x.error : ""));
+    if (r.ok) { const i = r.info; lines.push("", "ffmpeg: " + (i.canRender ? i.ffmpeg : "NOT INSTALLED - rendering will not work"), "CPU cores: " + i.cores + " | memory: " + i.memGB + " GB", "Titles on clips: " + (i.titles ? "yes" : "no font found"), "Stored: " + (i.usedBytes / 1e9).toFixed(2) + " GB of " + (i.maxBytes / 1e9).toFixed(1) + " GB allowed | videos kept at most " + i.ttlHours + " h", "Queue: " + i.queue + " clip(s)"); }
+    msg(lines.join("\n"), !r.ok);
+  });
+  $("cloudPurge").addEventListener("click", async () => {
+    if (!confirm("Delete EVERY video and clip stored on your server? (Your videos on this page stay.)")) return;
+    try { const r = await Cloud.purge(); lib.forEach((v) => { if (v.remote) { v.remote = null; } }); renderLib(); msg("Deleted " + r.deleted + " video(s) on the server."); } catch (e) { msg("Could not delete: " + errText(e), true); }
+  });
+  $("cloudClose").addEventListener("click", () => dlg.close());
+  setInterval(() => Cloud.flushDeletes(), 60000);            // keep retrying postponed deletes
+})();
 
 // Show unexpected errors in the status line; js/diagnostics.js also opens the full report pop-up for them.
 window.addEventListener("error", (e) => setStatus("Error: " + e.message, undefined, true));
@@ -1136,6 +1284,8 @@ function diagContext() {
   // Older visits remembered "Best quality (ffmpeg)", which is very slow on phones. Switch once to Turbo.
   if (store.get("engineV", 0) < 2) { store.set("engineV", 2); try { const sel = $("engineSel"); if (Exporter.turboAvailable() && sel.querySelector('option[value="turbo"]')) sel.value = "turbo"; sel.dispatchEvent(new Event("change", { bubbles: true })); } catch (e) { /* ignore */ } }
   if (!Exporter.turboAvailable()) { const o = $("engineSel").querySelector('option[value="turbo"]'); if (o) o.remove(); if ($("engineSel").value === "turbo") $("engineSel").value = "hq"; }
+  refreshCloudUI();
+  Cloud.flushDeletes();
   restoreLibrary();
   if (typeof Diag !== "undefined") Diag.init(diagContext);   // error reports + pop-up
   syncUI();

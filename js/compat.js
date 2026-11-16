@@ -97,9 +97,18 @@ const Compat = (function () {
       if (!(navigator.storage && navigator.storage.getDirectory)) return;
       const root = await navigator.storage.getDirectory();
       const dir = await root.getDirectoryHandle(DIR, { create: true });
-      for await (const [name] of dir.entries()) if (!(keepNames || []).includes(name)) await dir.removeEntry(name).catch(() => {});
+      // Only remove files that are NOT in the keep list AND are older than 10 minutes. The age rule protects a video that
+      // another window / tab / the installed app has just added but not saved yet (a real report: opening the installed
+      // app deleted the video the first window was still exporting from, which ended in "NotFoundError").
+      for await (const [name] of dir.entries()) {
+        const made = parseInt(name.slice(0, 8), 36) || 0;                       // the file name starts with its creation time
+        if (!(keepNames || []).some((k) => name === k || name.startsWith(k + "_")) && Date.now() - made > 600e3) await dir.removeEntry(name).catch(() => {});
+      }
     } catch (e) { /* nothing to clean */ }
   }
+
+  // Is the file still readable? (Android / another window can make it vanish.) Returns true / false.
+  async function readable(file) { try { await file.slice(0, 2048).arrayBuffer(); return true; } catch (e) { return false; } }
 
   // Get a stored copy back (after the page was closed and opened again).
   async function openCopy(name, file) {
@@ -153,5 +162,5 @@ const Compat = (function () {
   // A wake lock is dropped when the tab is hidden. Ask again when it comes back.
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && lockUsers && !lock) { try { navigator.wakeLock.request("screen").then((l) => { lock = l; l.addEventListener("release", () => (lock = null)); }).catch(() => {}); } catch (e) { /* ignore */ } } });
 
-  return { stableCopy, cleanOld, openCopy, keepAwake, guessType };
+  return { stableCopy, cleanOld, openCopy, readable, keepAwake, guessType };
 })();

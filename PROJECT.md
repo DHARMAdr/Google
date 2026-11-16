@@ -137,6 +137,14 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 - **Memory between visits** (`persist.js`): IndexedDB records + private copies/exports in OPFS; the library, clips and finished files come back after a reload. Analysis Lab data is not saved (analyse again).
 - Engine default migrated once to Turbo. Version 4.0.0, SW cache v7.
 
+## 9f. Optional cloud server (Round 8)
+
+- **Server** (`server/server.js`, no libraries, Node 18+ + native ffmpeg; Dockerfile + README included): token-protected API. Chunked resumable upload (8 MB pieces, any order), render queue (one clip at a time, native x264, same filter graph as the browser: blur/fill/fit, fades, title via drawtext, loudnorm, speed), Range downloads, `DELETE /api/videos/:id` removes source + clips, `POST /api/purge`, 48 h safety-net expiry (`TTL_HOURS`), size/disk limits, CORS allow-list. Jobs survive a server restart.
+- **Client** (`js/cloud.js`): off by default; main + backup/proxy address (fastest answers, other is fallback); 3 parallel chunk uploads with retries and resume; job polling; resumable download; **delete on server when the video is deleted on the site**, and if the server is unreachable the delete is remembered (localStorage `cloudDeletes`) and retried every minute and at start-up.
+- **App wiring**: header "Cloud" dialog (address, backup, token, auto-upload, Test, Purge); engine option "Cloud server" appears only when configured; clips picked up automatically when the page is reopened (library memory keeps `remote.id` + pending clip ids; clip ids are no longer renumbered on restore); if the server fails, clips are rendered on the device instead.
+- **Fix from the user's report (v3.3.0, NotFoundError after ~40 min)**: opening the installed app in a second window ran the start-up clean-up and deleted the OPFS copy the first window was exporting from. Clean-up now keeps files that are saved in the library, never deletes files younger than 10 minutes, and `ensureFile()` re-opens or clearly reports a missing copy before analysis / export (no pointless retries). Errors in attempts use `errText` (no more "Error: undefined").
+- Version 4.1.0, SW cache v8.
+
 ## 10. Future upgrades (ideas, biggest value first)
 
 1. **OCR of the kill feed** (tesseract.js) to keep only the player's own kills by name.
@@ -201,3 +209,8 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 - Added Turbo (hardware) export, keep-alive, persistent library. Measured here (desktop Chrome, software encoder): 12.9 s clip -> 13.4 s, 1080x1920 H.264 + AAC; 3 clips 25 s (ffmpeg engine: 97-145 s). Library restored after reload. Earlier recovery/format tests pass.
 - Not verifiable here: real phone speed (hardware encoder should be faster than this test), Android background behaviour.
 - Needs a server to truly run with the app closed (options in chat: cloud worker, or always-on PC).
+
+### Round 8 - Cloud server + stored-file fix (2026-11-17)
+- User has a Cloudflare setup and a proxy; asked for a per-video temporary server option with automatic removal on clear.
+- Added server + client as in 9f. Tested locally (Node server + real ffmpeg + browser): upload, 3-clip server render (1080x1920 H.264+AAC), page closed mid-render and clips collected after reopening, delete on site empties the server, delete while server is down is retried later, wrong token falls back to local rendering, test dialog shows ffmpeg/cores/storage. Earlier regression tests pass.
+- Not tested: a real Cloudflare deployment (a plain Worker cannot run ffmpeg: use Tunnel + this server, Docker, or Containers).

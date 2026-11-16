@@ -47,7 +47,7 @@ const Persist = (function () {
   async function loadExport(name) { const d = await expDir(); return (await d.getFileHandle(name)).getFile(); }
   async function delExport(name) { try { const d = await expDir(); await d.removeEntry(name); } catch (e) { /* ignore */ } }
   async function cleanExports(keep) {
-    try { const d = await expDir(); for await (const [n] of d.entries()) if (!keep.includes(n)) await d.removeEntry(n).catch(() => {}); } catch (e) { /* ignore */ }
+    try { const d = await expDir(); for await (const [n] of d.entries()) { const made = parseInt(n.slice(0, 8), 36) || 0; if (!keep.includes(n) && Date.now() - made > 600e3) await d.removeEntry(n).catch(() => {}); } } catch (e) { /* ignore */ }
   }
 
   return { put, del, all, saveExport, loadExport, delExport, cleanExports };
