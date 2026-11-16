@@ -121,13 +121,14 @@ const Engine = (function () {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     const s0 = performance.now();
     try {
+      if (v.noPlay) throw new Error("skipped: the browser cannot decode this format");
       if (!Ctx) throw new Error("This browser cannot read audio.");
       let ac;
       try { ac = new Ctx({ sampleRate: 16000 }); } catch (e) { ac = new Ctx(); }   // 16 kHz is plenty for gunshots and speech
       try { return await ac.decodeAudioData(await file.arrayBuffer()); }
       finally { if (ac.close) ac.close(); }
     } catch (e) {
-      rec.attempts.push({ step: "audio", strategy: "browser decodeAudioData", ok: false, error: (e.name || "Error") + ": " + e.message, ms: Math.round(performance.now() - s0) });
+      rec.attempts.push({ step: "audio", strategy: "browser decodeAudioData", ok: false, error: errText(e), ms: Math.round(performance.now() - s0) });
       console.warn("Browser audio decode failed, trying ffmpeg:", e);
     }
     stageMark("analyse:audio", "ffmpeg fallback");
@@ -326,7 +327,7 @@ const Engine = (function () {
       { name: "browser", make: () => makeVideoSource(v, geom, "browser", async () => ({ url: v.url })) },
       { name: "memory", make: () => makeVideoSource(v, geom, "memory", () => memoryURL(v)) },
       { name: "ffmpeg", make: () => makeFFmpegSource(v, geom, fps, (t) => progress && progress(0, 0, t)) }
-    ].filter((c) => !v.deadSources[c.name]);
+    ].filter((c) => !v.deadSources[c.name] && !(v.noPlay && c.name !== "ffmpeg"));   // a video the browser cannot play goes straight to ffmpeg
     if (opts.skipSources) opts.skipSources.forEach((nm) => { const k = chain.findIndex((c) => c.name === nm); if (k >= 0) chain.splice(k, 1); });
 
     // State that must survive a switch of source (so we RESUME instead of starting over).
@@ -414,9 +415,9 @@ const Engine = (function () {
       } catch (e) {
         try { src.close(); } catch (x) { /* ignore */ }
         if (e && e.message === CANCEL) throw e;
-        lastErr = e;
+        lastErr = e instanceof Error ? e : new Error(errText(e));
         v.deadSources[cand.name] = true;
-        rec.attempts.push({ step: "frames", strategy: cand.name, ok: false, error: (e.name || "Error") + ": " + e.message, ms: Math.round(performance.now() - s0), note: "failed at sample " + i + " of " + total });
+        rec.attempts.push({ step: "frames", strategy: cand.name, ok: false, error: errText(e), ms: Math.round(performance.now() - s0), note: "failed at sample " + i + " of " + total });
         console.warn("Frame source '" + cand.name + "' failed at sample " + i + ":", e);
         // Reset the "previous sample" memory so the first sample from the next source is not compared with a stale one.
         havePrev = false; prevHist = null; redInit = false; regNames.forEach((k) => (last[k].init = false));
@@ -495,7 +496,7 @@ const Engine = (function () {
       } catch (e) {
         if (e.message === CANCEL) throw e;
         console.warn("Audio scan skipped:", e);
-        rec.attempts.push({ step: "audio", strategy: "give up on sound", ok: false, error: (e.name || "Error") + ": " + e.message });
+        rec.attempts.push({ step: "audio", strategy: "give up on sound", ok: false, error: errText(e) });
         rec.notes.push("The sound could not be read, so the picture alone was used.");
         au = null;
       }

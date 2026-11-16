@@ -84,7 +84,8 @@
   <section class="card" id="sec-studio" hidden>
     <div class="card-head"><h2><span class="step">2</span> Studio: preview and trim by hand</h2></div>
     <video id="player" controls playsinline></video>
-    <p id="meta" class="muted small" style="margin:8px 0 10px"></p>
+    <p id="meta" class="muted small" style="margin:8px 0 6px"></p>
+    <button class="ghost small" id="proxyBtn" hidden style="margin-bottom:8px">Make preview copy (small, for watching only)</button>
 
     <canvas id="timeline"></canvas>
     <p class="hint">Click the timeline to jump. Drag the <b class="okc">green handles</b> to choose In and Out. Red dots are detected kills, orange dots are intense moments. Keys: <b>I</b> = In, <b>O</b> = Out, arrows = seek (Shift = fine).</p>
@@ -403,6 +404,7 @@
 
 <script src="js/diagnostics.js"></script>
 <script src="js/util.js"></script>
+<script src="js/compat.js"></script>
 <script src="js/profiles.js"></script>
 <script src="js/engine.js"></script>
 <script src="js/exporter.js"></script>

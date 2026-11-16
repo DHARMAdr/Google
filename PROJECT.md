@@ -115,6 +115,12 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 - **Error report** (`diagnostics.js` + `#errDlg`): pop-up with Copy / Download / Re-run tests. Contains summary, error + stack, stage trail, clicks, recovery attempts, auto-diagnosis, video + settings (name/size only), device, codec support, live canvas tests, console log, ffmpeg log. Opened automatically on failure; a toast for auto-fixed issues; "Report" button in the header.
 - Root cause of the user's "canvas tainted" error could not be reproduced in normal Chrome (http, file, sandboxed iframe all fine); likely an in-app browser / privacy feature / cloud-file source. The chain handles it regardless.
 
+## 9c. Compatibility layer (Round 5)
+
+- `js/compat.js`: **stable copy** of every picked file into private browser storage (OPFS, memory fallback) right at upload, because Android can revoke permission to a picked file later (real report: `NotReadableError ... permission problems after a reference to a file was acquired` broke every reader). Screen wake lock during analysis/export. Old copies cleaned at start.
+- **Any format**: if the browser cannot play the file (AVI, MKV, HEVC, video-track-less metadata...), `Exporter.probeInfo` reads length/size with ffmpeg, `v.noPlay=true`, analysis goes straight to the ffmpeg frame reader and audio via ffmpeg, export uses ffmpeg (Fast recorder auto-switches to Best quality), thumbnail via ffmpeg, and an optional "Make preview copy" (480p H.264) lets you watch it.
+- `errText()` turns any thrown thing into readable text (fixes `[object Object]` and `undefined` in reports).
+
 ## 10. Future upgrades (ideas, biggest value first)
 
 1. **OCR of the kill feed** (tesseract.js) to keep only the player's own kills by name.
@@ -161,3 +167,9 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 - `engine.js`: frame-source chain with resume, ffmpeg audio fallback, sound-only last resort, thumbnail tolerates taint. `exporter.js`: `extractFrames`, `decodeAudioPCM`, ffmpeg log buffer. `app.js`: report wiring, `diagContext`, export retry recipes.
 - Tested by simulating the exact SecurityError: (a) original blob tainted -> memory reader recovered, 6/6 kills found; (b) all video tainted -> ffmpeg reader recovered; (c) ffmpeg blocked too -> sound-only partial + report. Older e2e suite still passes. `sw.js` cache v4.
 - Known: ffmpeg reader is slower (~10 s for the 70 s test clip at 2 fps) and adds one extra decoy event; real cause of the user's error still unconfirmed - the report will tell us.
+
+### Round 5 - Android file-permission fix + all formats (2026-11-16)
+- From the user's first real error report (Pixel, Android Chrome, 230 MB 36-minute MP4): picked file became unreadable -> all readers failed -> sound-only result; also message showed `[object Object]`.
+- Added `compat.js` (stable copy, wake lock), ffmpeg probe / preview copy / thumbnail for unplayable formats, probe rejects files with sound but no decodable picture, better media-error text, readable attempt errors, report shows copy method and codec. SW cache v5.
+- Tested: MP4 (browser reader), AVI (mpeg4+mp3) and HEVC mp4 (ffmpeg reader, export, preview copy), simulated taint cases (all still recover). Not testable here: real Android permission revocation (the stable copy is the fix by design).
+- Note: 36-minute video at 5 fps = ~10,800 samples; on a phone use 2 fps (Fast) first.

@@ -127,17 +127,46 @@ async function addFiles(files) {
   for (const file of files) {
     if (!looksLikeVideo(file)) { setStatus("Skipped " + file.name + " (not a video file).", undefined, true); continue; }
     const v = {
-      id: videoSeq++, file, name: file.name, url: URL.createObjectURL(file), duration: 0, w: 0, h: 0, thumb: "",
-      an: null, anKey: "", det: null, clips: [], inT: 0, outT: 0, deleted: false
+      id: videoSeq++, file, name: file.name, url: "", duration: 0, w: 0, h: 0, thumb: "",
+      an: null, anKey: "", det: null, clips: [], inT: 0, outT: 0, deleted: false, noPlay: false, previewUrl: "", codec: "", copyHow: "", cleanup: null
     };
+    // STEP 1: make a stable private copy right now, while the phone still allows reading the picked file.
+    // (On Android the permission can disappear later, which made every reader fail in a real report.)
+    try {
+      setStatus("Saving a safe copy of " + file.name + " inside the browser...", 0);
+      const c = await Compat.stableCopy(file, (f) => setStatus("Saving a safe copy of " + file.name + "... " + Math.round(f * 100) + "%", f));
+      v.file = c.file; v.copyHow = c.how; v.cleanup = c.cleanup;
+    } catch (err) {
+      const msg = "Could not read " + file.name + ": " + errText(err) + " Pick the file again (or copy it to your Downloads folder first).";
+      setStatus(msg, 0, true); reportProblem(err, { recovered: false, stage: "add video", attempts: err.attempts, note: msg, extra: { "File": file.name, "Size (MB)": (file.size / 1048576).toFixed(1) } });
+      continue;
+    }
+    // STEP 2: read length and size. The browser first; if it cannot play the format, ffmpeg does it.
+    v.url = URL.createObjectURL(v.file);
     try { setStatus("Reading " + file.name + "...", 0); await probe(v); }
-    catch (err) { URL.revokeObjectURL(v.url); setStatus(file.name + ": " + err.message, 0, true); toast(file.name + ": " + err.message, true); continue; }
+    catch (err) {
+      const first = errText(err);
+      try {
+        setStatus(file.name + ": the browser cannot play this format, using the compatibility engine (first time loads about 30 MB)...", 0);
+        const info = await Exporter.probeInfo(v, (t) => setStatus(t, 0));
+        URL.revokeObjectURL(v.url); v.url = "";
+        v.noPlay = true; v.duration = info.duration; v.w = info.w; v.h = info.h; v.codec = info.codec;
+        toast(v.name + ": format '" + info.codec + "' is not playable in this browser. Analysis and export still work; use 'Make preview copy' to watch it.");
+        reportProblem(new Error(first), { recovered: true, show: "none", stage: "add video", note: "Browser could not play it; ffmpeg read it instead (" + info.info + ")" });
+      } catch (err2) {
+        URL.revokeObjectURL(v.url); v.cleanup && v.cleanup();
+        const msg = file.name + ": cannot be read. " + first + " | compatibility engine: " + errText(err2);
+        setStatus(msg, 0, true); reportProblem(err2, { recovered: false, stage: "add video", note: msg, attempts: [{ step: "probe", strategy: "browser", ok: false, error: first }, { step: "probe", strategy: "ffmpeg", ok: false, error: errText(err2) }] });
+        continue;
+      }
+    }
     v.outT = Math.min(30, v.duration);
     lib.push(v);
     renderLib(); renderStats();
     if (!cur) selectVideo(v);
-    setStatus("Added " + file.name + ".", 0);
-    Engine.thumbnail(v).then((u) => { v.thumb = u; renderLib(); }).catch(() => {});   // small picture, not important if it fails
+    setStatus("Added " + file.name + (v.copyHow ? " (safe copy: " + v.copyHow + ")" : "") + ".", 0);
+    // The small picture is decoration only, so any failure is ignored.
+    (v.noPlay ? Exporter.thumbFF(v, Math.min(v.duration * 0.1, 3)) : Engine.thumbnail(v)).then((u) => { v.thumb = u; renderLib(); }).catch((e) => console.warn("Thumbnail skipped:", errText(e)));
   }
 }
 
@@ -151,9 +180,10 @@ function probe(v) {
       clearTimeout(timer);
       v.duration = t.duration; v.w = t.videoWidth; v.h = t.videoHeight;
       if (!isFinite(v.duration) || v.duration <= 0) reject(new Error("unknown length (is the file damaged?)."));
+      else if (!t.videoWidth || !t.videoHeight) reject(new Error("the browser can read the sound but cannot decode the picture (unsupported video codec, often HEVC / H.265)."));
       else resolve();
     };
-    t.onerror = () => { clearTimeout(timer); reject(new Error("this browser cannot play it. Try an MP4 (H.264) file.")); };
+    t.onerror = () => { clearTimeout(timer); const me = t.error; reject(new Error("this browser cannot play it" + (me ? " (media error " + me.code + (me.message ? ": " + me.message : "") + ")" : "") + ".")); };
     t.src = v.url;
   });
 }
@@ -209,7 +239,9 @@ function removeVideo(v) {
   v.deleted = true;
   v.clips.forEach((c) => c.out && URL.revokeObjectURL(c.out.url));    // free exported files from memory
   Exporter.unmountVideo(v);
-  URL.revokeObjectURL(v.url);
+  if (v.url) URL.revokeObjectURL(v.url);
+  if (v.previewUrl) URL.revokeObjectURL(v.previewUrl);
+  try { v.cleanup && v.cleanup(); } catch (e) { /* ignore */ }
   lib.splice(lib.indexOf(v), 1);
   if (cur === v) cur = null;
 }
@@ -226,8 +258,9 @@ function afterLibraryChange() {
 
 function selectVideo(v) {
   cur = v;
-  player.src = v.url;
-  $("meta").textContent = v.name + "  |  " + fmt(v.duration) + "  |  " + v.w + "x" + v.h;
+  if (v.url || v.previewUrl) player.src = v.previewUrl || v.url; else { player.removeAttribute("src"); player.load(); }
+  $("meta").textContent = v.name + "  |  " + fmt(v.duration) + "  |  " + v.w + "x" + v.h + (v.noPlay ? "  |  format " + v.codec + " (not playable here" + (v.previewUrl ? ", showing a small preview copy" : "") + ")" : "");
+  $("proxyBtn").hidden = !(v.noPlay && !v.previewUrl);
   ["sec-studio", "sec-analyse", "sec-clips", "sec-export"].forEach((id) => ($(id).hidden = false));
   $("inT").value = v.inT.toFixed(1); $("outT").value = v.outT.toFixed(1);
   renderLib(); renderClips(); drawTimeline(); drawLab(); renderEventTable(); updateAnState(); renderStats();
@@ -421,7 +454,7 @@ async function doAnalyse(v) {
   const fps = classic ? 1 : P.fps;
   const regions = classic ? {} : getRegions(P.profile);
   aCtl = { cancel: false };
-  setBusy(true); setAState("Starting...", 0.01);
+  setBusy(true); setAState("Starting...", 0.01); Compat.keepAwake(true);
   try {
     v.an = await Engine.analyse(v, { fps, regions, profile: classic ? "auto" : P.profile, height: fps >= 10 ? 144 : 108, regionWidth: fps >= 30 ? 320 : 240 },
       aCtl, (f, text) => setAState(typeof text === "string" ? text : "Working...", f));
@@ -429,11 +462,11 @@ async function doAnalyse(v) {
     const rec = v.an.recovery, failed = rec ? rec.attempts.filter((a) => !a.ok) : [];
     if (v.an.partial) {
       setAState("Finished using SOUND ONLY (pictures could not be read). See the report.", 1, true);
-      reportProblem(failed[0] || new Error("Pictures could not be read"), { recovered: "partial", stage: "analyse", attempts: rec.attempts, note: rec.notes.join(" ") });
+      reportProblem(new Error(failed.length ? failed.map((a) => a.strategy + ": " + a.error).join(" | ") : "Pictures could not be read"), { recovered: "partial", stage: "analyse", attempts: rec.attempts, note: rec.notes.join(" ") });
     } else {
       setAState("Analysis finished in " + fmt(v.an.seconds) + "." + (failed.length ? " (fixed automatically - " + (rec.frameSource || "backup") + " reader used)" : ""), 1);
       // Something failed on the way but the self-healing code got through: tell the user, quietly.
-      if (failed.length) reportProblem(failed[0].error ? new Error(failed[0].error) : new Error("Recovered"), { recovered: true, stage: "analyse", attempts: rec.attempts });
+      if (failed.length) reportProblem(new Error(failed[0].error || "Recovered"), { recovered: true, stage: "analyse", attempts: rec.attempts });
     }
     return true;
   } catch (err) {
@@ -443,7 +476,7 @@ async function doAnalyse(v) {
       reportProblem(err, { recovered: false, stage: "analyse", attempts: err.attempts });
     }
     return false;
-  } finally { setBusy(false); }
+  } finally { setBusy(false); Compat.keepAwake(false); }
 }
 
 function makeClip(start, end, extra) {
@@ -753,7 +786,7 @@ function setEStatus(text, p, err) {
 }
 
 function setExporting(on) {
-  exporting = on;
+  exporting = on; Compat.keepAwake(on);
   $("cancelBtn").hidden = !on;
   $("exportAllBtn").disabled = on || !(cur && cur.clips.length);
   document.querySelectorAll('[data-act="export"]').forEach((b) => (b.disabled = on));
@@ -769,6 +802,7 @@ function clipFileName(v, clip, ext) {
 // Export ONE clip. Returns true when finished, false if cancelled or failed.
 async function exportClip(v, clip) {
   const base = readExport();
+  if (v.noPlay && base.engine === "fast") base.engine = "hq";      // the real-time recorder needs a playable video
   const card = $("clipList").querySelector(`.clip[data-id="${clip.id}"]`);
   const barEl = card && card.querySelector('[data-role="bar"]');
   const say = (t) => { clip.status = t; if (!clip.out) updateClipCard(clip); setEStatus(t); };
@@ -911,7 +945,19 @@ function drawCal() {
     g.fillStyle = ROLE_COLORS[k]; g.font = "bold 12px system-ui"; g.fillText({ killfeed: "Kill feed", banner: "Banner", hit: "Hit marker" }[k], r.x * c.width + 4, r.y * c.height + 14);
   });
 }
+$("proxyBtn").addEventListener("click", async () => {
+  const v = cur; if (!v || analysing || exporting) return;
+  $("proxyBtn").disabled = true; Compat.keepAwake(true);
+  try {
+    const f = await Exporter.makeProxy(v, (p, eta) => setStatus("Making a preview copy... " + Math.round(p * 100) + "%" + (eta > 2 ? " (about " + fmt(eta) + " left)" : ""), p), (t) => setStatus(t, 0));
+    v.previewUrl = URL.createObjectURL(f); if (cur === v) selectVideo(v);
+    setStatus("Preview copy ready (small size, only for watching; analysis and export still use your original).", 1);
+  } catch (e) { setStatus("Preview copy failed: " + errText(e), 0, true); reportProblem(e, { recovered: false, stage: "preview copy" }); $("proxyBtn").disabled = false; }
+  finally { Compat.keepAwake(false); $("proxyBtn").disabled = false; }
+});
+
 $("calBtn").addEventListener("click", () => {
+  if (cur && cur.noPlay && !cur.previewUrl) { toast("Make the preview copy first (button under the player) so the picture can be shown here.", true); return; }
   if (!cur) return;
   const P = readParams();
   if (!PROFILES[P.profile].feed) { toast("Pick a shooter profile first (kill feed top-right / left / bottom-left).", true); return; }
@@ -996,7 +1042,7 @@ function diagContext() {
     ctx.video = {
       Name: v.name, "Size (MB)": (v.file.size / 1048576).toFixed(1), sizeMB: Math.round(v.file.size / 1048576), "File type": v.file.type || "(empty)", "Last modified": new Date(v.file.lastModified).toISOString(),
       Duration: fmt(v.duration) + " (" + v.duration.toFixed(2) + " s)", Resolution: v.w + "x" + v.h, "Blob address": (v.url || "").slice(0, 60), "Blob origin": (function () { try { return new URL(v.url).origin; } catch (e) { return "?"; } })(),
-      "Analysed": !!v.an, "Frame reader used": v.an && v.an.recovery ? (v.an.recovery.frameSource || "n/a") : "n/a", "Readers marked dead": Object.keys(v.deadSources || {}).join(", ") || "none", "Clips": v.clips.length
+      "Analysed": !!v.an, "Frame reader used": v.an && v.an.recovery ? (v.an.recovery.frameSource || "n/a") : "n/a", "Safe copy": v.copyHow || "none", "Browser can play it": !v.noPlay, "Video codec (if ffmpeg read it)": v.codec || "n/a", "Readers marked dead": Object.keys(v.deadSources || {}).join(", ") || "none", "Clips": v.clips.length
     };
   }
   try { ctx.settings = { analysis: readParams(), export: readExport() }; } catch (e) { ctx.settings = { error: e.message }; }
@@ -1005,6 +1051,7 @@ function diagContext() {
 
 /* ---------- START-UP ---------- */
 (function init() {
+  Compat.cleanOld();        // remove stale private copies from earlier visits
   if (typeof Diag !== "undefined") Diag.init(diagContext);   // error reports + pop-up
   syncUI();
   const missing = [];

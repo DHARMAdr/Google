@@ -99,11 +99,23 @@ function seekTo(video, t) {
 }
 
 // Wait until a video has data to show (rejects with a friendly message on failure).
+// Turn ANY thrown thing (Error, string, event, object) into readable text. Some libraries throw
+// plain objects, which used to show up as "[object Object]" or "undefined" in messages.
+function errText(e) {
+  try {
+    if (e === undefined || e === null) return "unknown error (nothing was thrown with a message)";
+    if (typeof e === "string") return e;
+    if (e instanceof Error || e.message) return (e.name && e.name !== "Error" ? e.name + ": " : "") + (e.message || "(no message)");
+    if (e.type && e.target) return "event '" + e.type + "' on " + (e.target.tagName || e.target.constructor.name);
+    const j = JSON.stringify(e); return j && j !== "{}" ? j.slice(0, 300) : String(e);
+  } catch (x) { return "unreadable error"; }
+}
+
 function whenLoaded(video, ms) {
   return new Promise((resolve, reject) => {
     if (video.readyState >= 2) { resolve(); return; }
     const ok = () => { cleanup(); resolve(); };
-    const bad = () => { cleanup(); reject(new Error("This browser cannot play that video. Try an MP4 (H.264) file.")); };
+    const bad = () => { cleanup(); const me = video.error; reject(new Error("This browser cannot play that video" + (me ? " (media error " + me.code + (me.message ? ": " + me.message : "") + ")" : "") + ".")); };
     const cleanup = () => { video.removeEventListener("loadeddata", ok); video.removeEventListener("error", bad); clearTimeout(timer); };
     const timer = setTimeout(() => { cleanup(); reject(new Error("The video took too long to load.")); }, ms || 20000);
     video.addEventListener("loadeddata", ok);

@@ -299,6 +299,60 @@ const Exporter = (function () {
     return f;
   }
 
+
+  /* ---------- FORMAT HELPERS for videos the browser cannot play (HEVC, MKV, AVI, MOV variants...) ---------- */
+
+  // Read length and picture size by asking ffmpeg to describe the file (it prints the info in its log).
+  async function probeInfo(v, onStatus) {
+    await loadEngine(onStatus);
+    const src = await mountVideo(v);
+    const lines = [];
+    const on = ({ message }) => lines.push(message);
+    ff.on("log", on);
+    try { await ff.exec(["-hide_banner", "-i", src.path]); }          // exits with an error code because there is no output file: that is fine
+    finally { try { ff.off("log", on); } catch (e) { /* ignore */ } }
+    const text = lines.join("\n");
+    const d = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(text);
+    const vl = lines.find((l) => /Stream #.*Video:/.test(l) && !/attached pic/.test(l));
+    if (!vl) throw new Error("ffmpeg found no video picture in this file");
+    const m = /[ ,](\d{2,5})x(\d{2,5})[ ,\[]/.exec(vl.replace(/(?<![0-9A-Za-z])0x[0-9a-f]+/gi, ""));
+    let w = m ? +m[1] : 0, h = m ? +m[2] : 0;
+    const rot = /rotation of (-?\d+(?:\.\d+)?) degrees/.exec(text);
+    if (rot && Math.abs(Math.round(+rot[1] / 90)) % 2 === 1) { const t = w; w = h; h = t; }   // phone video stored sideways
+    const duration = d ? +d[1] * 3600 + +d[2] * 60 + +d[3] : 0;
+    if (!w || !h || !duration) throw new Error("ffmpeg could not read the length / size (" + (vl || "").slice(0, 120) + ")");
+    return { duration, w, h, codec: ((/Video:\s*([a-z0-9_]+)/i.exec(vl) || [])[1]) || "?", info: vl.trim().slice(0, 200) };
+  }
+
+  // Make a small, easy-to-play copy (480p H.264) so the preview player works. Only used for the preview.
+  async function makeProxy(v, onProgress, onStatus) {
+    await loadEngine(onStatus);
+    const src = await mountVideo(v);
+    const t0 = performance.now();
+    const on = ({ message }) => {
+      const m = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(message);
+      if (m) { const f = Math.min(1, (+m[1] * 3600 + +m[2] * 60 + +m[3]) / v.duration), el = (performance.now() - t0) / 1000; onProgress && onProgress(f, f > 0.02 ? el / f - el : 0); }
+    };
+    ff.on("log", on);
+    try {
+      const code = await ff.exec(["-hide_banner", "-i", src.path, "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:'min(480,ih)',format=yuv420p", "-r", "24",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-c:a", "aac", "-b:a", "80k", "-ac", "2", "-movflags", "+faststart", "/proxy.mp4"]);
+      if (code !== 0) throw new Error("ffmpeg could not make a preview copy (code " + code + ")");
+      const data = await ff.readFile("/proxy.mp4");
+      try { await ff.deleteFile("/proxy.mp4"); } catch (e) { /* ignore */ }
+      return new File([data.buffer], "preview.mp4", { type: "video/mp4" });
+    } finally { try { ff.off("log", on); } catch (e) { /* ignore */ } }
+  }
+
+  // One small JPEG picture (used for the library thumbnail of unplayable videos).
+  async function thumbFF(v, atSec) {
+    const fr = await extractFrames(v, [{ w: 160, h: Math.max(2, Math.round((160 * v.h) / v.w / 2) * 2), crop: null }], atSec, 1, 1);
+    const f = fr[0][0]; if (!f) return "";
+    const w = 160, h = Math.max(2, Math.round((160 * v.h) / v.w / 2) * 2), c = document.createElement("canvas"); c.width = w; c.height = h;
+    c.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(f.buffer, f.byteOffset, w * h * 4), w, h), 0, 0);
+    return c.toDataURL("image/jpeg", 0.7);
+  }
+
   const getLog = () => logBuf.slice();
 
   // Stop an export that is running (kills the ffmpeg worker; it reloads next time).
@@ -445,5 +499,5 @@ const Exporter = (function () {
     return exportFF(v, clip, o, h.progress, h.status);
   }
 
-  return { exportClip, cancel, unmountVideo, makeZip, outSize, loadEngine, extractFrames, decodeAudioPCM, getLog };
+  return { exportClip, cancel, unmountVideo, makeZip, outSize, loadEngine, extractFrames, decodeAudioPCM, getLog, probeInfo, makeProxy, thumbFF };
 })();
