@@ -37,6 +37,7 @@ const Exporter = (function () {
   let loading = null;          // a promise while ffmpeg is still loading
   const mounts = new Map();    // video id -> folder where the file is mounted inside ffmpeg
   let cancelled = false;
+  const logBuf = [];           // last lines ffmpeg printed (goes into the error report)
 
   // Places to load ffmpeg's core from: your own site first, then public CDNs as a back-up.
   const CORE_BASES = [
@@ -115,6 +116,8 @@ const Exporter = (function () {
           const wasmURL = await blobURL(base + "ffmpeg-core.wasm", "application/wasm",
             (f) => onStatus && onStatus("Loading the export engine... " + Math.round(f * 100) + "%"));
           await inst.load({ coreURL, wasmURL });
+          // Keep ffmpeg's own messages: they are the best clue when something fails.
+          inst.on("log", ({ message }) => { logBuf.push(String(message).slice(0, 300)); if (logBuf.length > 120) logBuf.shift(); });
           ff = inst;
           return ff;
         } catch (e) { lastErr = e; try { inst.terminate(); } catch (x) { /* ignore */ } }
@@ -247,6 +250,56 @@ const Exporter = (function () {
       try { ff && ff.off("log", onLog); } catch (e) { /* ignore */ }
     }
   }
+
+
+  /* ---------- SELF-HEALING HELPERS (used by engine.js when the browser cannot read pixels) ----------
+     WHY: if the browser refuses to let the page read pixels from a <video> (a "tainted canvas"),
+     we do not need the browser at all. ffmpeg can decode the file itself and hand us the raw
+     pixels as plain numbers, which can never be "tainted". It is slower but it always works.   */
+
+  // Decode a stretch of video into raw RGBA pictures.
+  //   specs: [{ w, h, crop: {x,y,w,h} | null }]  one entry per picture we want per frame
+  //   returns: array (one per spec) of arrays of Uint8Array frames.
+  async function extractFrames(v, specs, start, dur, fps, onStatus) {
+    await loadEngine(onStatus);
+    const src = await mountVideo(v);
+    const n = specs.length;
+    let fc = "[0:v]fps=" + fps + ",split=" + n + specs.map((_, i) => "[s" + i + "]").join("") + ";";
+    fc += specs.map((sp, i) => {
+      const crop = sp.crop ? "crop=w=iw*" + sp.crop.w.toFixed(5) + ":h=ih*" + sp.crop.h.toFixed(5) + ":x=iw*" + sp.crop.x.toFixed(5) + ":y=ih*" + sp.crop.y.toFixed(5) + "," : "";
+      return "[s" + i + "]" + crop + "scale=" + sp.w + ":" + sp.h + ":flags=area,format=rgba[o" + i + "]";
+    }).join(";");
+    const args = ["-hide_banner", "-ss", start.toFixed(3), "-t", dur.toFixed(3), "-i", src.path, "-an", "-filter_complex", fc];
+    specs.forEach((_, i) => args.push("-map", "[o" + i + "]", "-f", "rawvideo", "-pix_fmt", "rgba", "/fr" + i + ".rgba"));
+    const code = await ff.exec(args);
+    if (code !== 0) throw new Error("ffmpeg could not decode the video frames (code " + code + ")");
+    const result = [];
+    for (let i = 0; i < n; i++) {
+      const data = await ff.readFile("/fr" + i + ".rgba");
+      try { await ff.deleteFile("/fr" + i + ".rgba"); } catch (e) { /* ignore */ }
+      const size = specs[i].w * specs[i].h * 4, frames = [];
+      for (let o = 0; o + size <= data.length; o += size) frames.push(data.subarray(o, o + size));
+      result.push(frames);
+    }
+    return result;
+  }
+
+  // Decode the audio track to 16 kHz mono numbers (used when decodeAudioData cannot read the audio).
+  async function decodeAudioPCM(v, onStatus) {
+    await loadEngine(onStatus);
+    const src = await mountVideo(v);
+    const code = await ff.exec(["-hide_banner", "-i", src.path, "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "/pcm.raw"]);
+    if (code !== 0) throw new Error("ffmpeg could not read an audio track (code " + code + ")");
+    const data = await ff.readFile("/pcm.raw");
+    try { await ff.deleteFile("/pcm.raw"); } catch (e) { /* ignore */ }
+    if (!data || data.length < 3200) throw new Error("the video has no usable audio track");
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const f = new Float32Array(Math.floor(data.length / 2));
+    for (let i = 0; i < f.length; i++) f[i] = view.getInt16(i * 2, true) / 32768;
+    return f;
+  }
+
+  const getLog = () => logBuf.slice();
 
   // Stop an export that is running (kills the ffmpeg worker; it reloads next time).
   function cancel() {
@@ -392,5 +445,5 @@ const Exporter = (function () {
     return exportFF(v, clip, o, h.progress, h.status);
   }
 
-  return { exportClip, cancel, unmountVideo, makeZip, outSize, loadEngine };
+  return { exportClip, cancel, unmountVideo, makeZip, outSize, loadEngine, extractFrames, decodeAudioPCM, getLog };
 })();

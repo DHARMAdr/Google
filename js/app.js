@@ -426,11 +426,22 @@ async function doAnalyse(v) {
     v.an = await Engine.analyse(v, { fps, regions, profile: classic ? "auto" : P.profile, height: fps >= 10 ? 144 : 108, regionWidth: fps >= 30 ? 320 : 240 },
       aCtl, (f, text) => setAState(typeof text === "string" ? text : "Working...", f));
     v.anKey = key;
-    setAState("Analysis finished in " + fmt(v.an.seconds) + ".", 1);
+    const rec = v.an.recovery, failed = rec ? rec.attempts.filter((a) => !a.ok) : [];
+    if (v.an.partial) {
+      setAState("Finished using SOUND ONLY (pictures could not be read). See the report.", 1, true);
+      reportProblem(failed[0] || new Error("Pictures could not be read"), { recovered: "partial", stage: "analyse", attempts: rec.attempts, note: rec.notes.join(" ") });
+    } else {
+      setAState("Analysis finished in " + fmt(v.an.seconds) + "." + (failed.length ? " (fixed automatically - " + (rec.frameSource || "backup") + " reader used)" : ""), 1);
+      // Something failed on the way but the self-healing code got through: tell the user, quietly.
+      if (failed.length) reportProblem(failed[0].error ? new Error(failed[0].error) : new Error("Recovered"), { recovered: true, stage: "analyse", attempts: rec.attempts });
+    }
     return true;
   } catch (err) {
     if (err.message === Engine.CANCEL) { setAState("Analysis cancelled.", 0); toast("Analysis cancelled."); }
-    else { console.error(err); setAState("Analysis failed: " + err.message, 0, true); toast("Analysis failed: " + err.message, true); }
+    else {
+      console.error(err); setAState("Analysis failed: " + err.message + " - a full report was opened.", 0, true);
+      reportProblem(err, { recovered: false, stage: "analyse", attempts: err.attempts });
+    }
     return false;
   } finally { setBusy(false); }
 }
@@ -757,30 +768,59 @@ function clipFileName(v, clip, ext) {
 
 // Export ONE clip. Returns true when finished, false if cancelled or failed.
 async function exportClip(v, clip) {
-  const o = readExport();
+  const base = readExport();
   const card = $("clipList").querySelector(`.clip[data-id="${clip.id}"]`);
   const barEl = card && card.querySelector('[data-role="bar"]');
   const say = (t) => { clip.status = t; if (!clip.out) updateClipCard(clip); setEStatus(t); };
   if (clip.out) { URL.revokeObjectURL(clip.out.url); clip.out = null; }
   if (barEl) barEl.style.width = "0%";
   say("Preparing...");
-  try {
-    const r = await Exporter.exportClip(v, clip, o, {
-      ctl: eCtl, hiddenVideo: $("exportVideo"),
-      status: say,
-      progress: (f, eta) => { if (barEl) barEl.style.width = Math.round(f * 100) + "%"; $("eBar").style.width = Math.round(f * 100) + "%"; if (eta > 2) setEStatus((clip.status || "").split("  (")[0] + "  (about " + fmt(eta) + " left)"); }
-    });
-    clip.out = { url: URL.createObjectURL(r.blob), name: clipFileName(v, clip, r.ext), size: r.blob.size, ext: r.ext };
-    if (barEl) barEl.style.width = "100%";
-    updateClipCard(clip); renderStats();
-    return true;
-  } catch (err) {
-    if (err.message === "cancelled") { clip.status = "Cancelled."; setEStatus("Export cancelled.", 0); }
-    else { console.error(err); clip.status = "Failed: " + err.message; setEStatus("Export failed: " + err.message, 0, true); toast("Export failed: " + err.message, true); }
-    updateClipCard(clip);
-    if (barEl) barEl.style.width = "0%";
-    return false;
+
+  // SELF-HEALING EXPORT: if the chosen settings fail, we try simpler recipes one after another.
+  // Recipe 0 is exactly what the user chose. Later ones drop risky extras (title picture, loudness,
+  // speed change), then lower the resolution, then switch engine.
+  const recipes = [{ name: "your settings", o: base }];
+  if (base.engine === "hq") {
+    recipes.push({ name: "simple options (no title / loudness / fades, quick preset)", o: Object.assign({}, base, { preset: "quick", title: false, loud: false, fade: 0, speed: 1 }) });
+    recipes.push({ name: "low resolution (540p, 30 fps, quick preset)", o: Object.assign({}, base, { preset: "quick", title: false, loud: false, fade: 0, speed: 1, res: "540", fps: "30" }) });
+    recipes.push({ name: "lossless cut (original shape)", o: Object.assign({}, base, { engine: "copy" }) });
+  } else if (base.engine === "fast") {
+    recipes.push({ name: "best-quality engine, quick preset", o: Object.assign({}, base, { engine: "hq", preset: "quick", title: false, loud: false }) });
+    recipes.push({ name: "lossless cut (original shape)", o: Object.assign({}, base, { engine: "copy" }) });
   }
+  const attempts = [];
+  for (let k = 0; k < recipes.length; k++) {
+    const rcp = recipes[k], s0 = performance.now();
+    try {
+      if (k > 0) { say("Retrying with " + rcp.name + "..."); try { Exporter.cancel(); } catch (e) { /* reset the engine */ } eCtl.cancel = false; }
+      const r = await Exporter.exportClip(v, clip, rcp.o, {
+        ctl: eCtl, hiddenVideo: $("exportVideo"),
+        status: say,
+        progress: (f, eta) => { if (barEl) barEl.style.width = Math.round(f * 100) + "%"; $("eBar").style.width = Math.round(f * 100) + "%"; if (eta > 2) setEStatus((clip.status || "").split("  (")[0] + "  (about " + fmt(eta) + " left)"); }
+      });
+      clip.out = { url: URL.createObjectURL(r.blob), name: clipFileName(v, clip, r.ext), size: r.blob.size, ext: r.ext };
+      if (barEl) barEl.style.width = "100%";
+      updateClipCard(clip); renderStats();
+      if (k > 0) {
+        attempts.push({ step: "export", strategy: rcp.name, ok: true, ms: Math.round(performance.now() - s0) });
+        clip.status = "Done with " + rcp.name + " (your settings failed).";
+        reportProblem(new Error(attempts[0].error), { recovered: k === recipes.length - 1 && rcp.o.engine === "copy" ? "partial" : true, stage: "export", attempts, note: "Exported with: " + rcp.name });
+        updateClipCard(clip);
+      }
+      return true;
+    } catch (err) {
+      if (err.message === "cancelled" || (eCtl && eCtl.cancel)) { clip.status = "Cancelled."; setEStatus("Export cancelled.", 0); updateClipCard(clip); if (barEl) barEl.style.width = "0%"; return false; }
+      console.error(err);
+      attempts.push({ step: "export", strategy: rcp.name, ok: false, error: (err.name || "Error") + ": " + err.message, ms: Math.round(performance.now() - s0) });
+      if (k === recipes.length - 1) {
+        clip.status = "Failed: " + err.message; setEStatus("Export failed: " + err.message + " - a full report was opened.", 0, true);
+        updateClipCard(clip); if (barEl) barEl.style.width = "0%";
+        reportProblem(err, { recovered: false, stage: "export", attempts });
+        return false;
+      }
+    }
+  }
+  return false;
 }
 
 async function exportOne(clip) {
@@ -938,12 +978,34 @@ if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)) {
 // Warn before closing the tab while an export or analysis is running.
 window.addEventListener("beforeunload", (e) => { if (exporting || analysing) { e.preventDefault(); e.returnValue = ""; } });
 
-// Show unexpected errors instead of failing silently.
+// Show unexpected errors in the status line; js/diagnostics.js also opens the full report pop-up for them.
 window.addEventListener("error", (e) => setStatus("Error: " + e.message, undefined, true));
 window.addEventListener("unhandledrejection", (e) => setStatus("Error: " + ((e.reason && e.reason.message) || e.reason), undefined, true));
 
+// One helper used everywhere: send a problem (fixed or not) to the report system.
+function reportProblem(err, options) {
+  try { if (typeof Diag !== "undefined") return Diag.capture(err instanceof Error ? err : new Error(String(err && err.message || err)), Object.assign({ force: true }, options)); }
+  catch (e) { console.error("Could not make the error report:", e); }
+}
+
+// Tells the report system what video and settings are active (names and numbers only, never the video data).
+function diagContext() {
+  const v = cur, ctx = { extra: { "Videos in library": lib.length, "Analysing": analysing, "Exporting": exporting } };
+  if (v) {
+    ctx.videoObj = v;
+    ctx.video = {
+      Name: v.name, "Size (MB)": (v.file.size / 1048576).toFixed(1), sizeMB: Math.round(v.file.size / 1048576), "File type": v.file.type || "(empty)", "Last modified": new Date(v.file.lastModified).toISOString(),
+      Duration: fmt(v.duration) + " (" + v.duration.toFixed(2) + " s)", Resolution: v.w + "x" + v.h, "Blob address": (v.url || "").slice(0, 60), "Blob origin": (function () { try { return new URL(v.url).origin; } catch (e) { return "?"; } })(),
+      "Analysed": !!v.an, "Frame reader used": v.an && v.an.recovery ? (v.an.recovery.frameSource || "n/a") : "n/a", "Readers marked dead": Object.keys(v.deadSources || {}).join(", ") || "none", "Clips": v.clips.length
+    };
+  }
+  try { ctx.settings = { analysis: readParams(), export: readExport() }; } catch (e) { ctx.settings = { error: e.message }; }
+  return ctx;
+}
+
 /* ---------- START-UP ---------- */
 (function init() {
+  if (typeof Diag !== "undefined") Diag.init(diagContext);   // error reports + pop-up
   syncUI();
   const missing = [];
   if (!window.MediaRecorder) missing.push("video recording (Fast recorder will not work)");

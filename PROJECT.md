@@ -72,7 +72,7 @@ Version 3 adds three engines:
 
 Tips: "Whole video + blurred bars" keeps the full original picture (no zoom, no upscaling blur). "Crop to fill" zooms in, so it is softer by nature. Presets: Maximum = veryfast CRF 16, High = superfast CRF 18, Quick = ultrafast CRF 20.
 
-## 6. Feature list (v3)
+## 6. Feature list (v3.1)
 
 **Library** - add many videos with thumbnails, select, delete one or all, memory cleanup, friendly errors.
 **Studio** - player, timeline with excitement curve and event dots, draggable In/Out handles, typed In/Out, nudges, keyboard shortcuts (I, O, arrows), play selection, add clip, split at playhead.
@@ -106,6 +106,14 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 - Scan speed depends on seeking: long videos at high detail are slow (about 1x real time at 10 fps on the test machine).
 - Tab should stay open and visible during scanning and exporting.
 - No speech/OCR yet, so the player's name is not recognised.
+
+## 9b. Self-healing and error reports (added in Round 4)
+
+- **Frame reader chain** (`engine.js`): `browser` (video + canvas) -> `memory` (copy file into RAM, play that) -> `ffmpeg` (decode ourselves, plain numbers cannot be tainted). On failure the scan RESUMES at the same sample with the next reader; a reader that failed is remembered per video (`v.deadSources`).
+- **Audio chain**: `decodeAudioData` -> ffmpeg PCM decode. **Last resort**: if no pictures can be read, finish with sound only and flag the result as partial.
+- **Export recipes** (`app.js exportClip`): your settings -> simple options -> 540p/30fps quick -> lossless cut. The engine is reset between tries.
+- **Error report** (`diagnostics.js` + `#errDlg`): pop-up with Copy / Download / Re-run tests. Contains summary, error + stack, stage trail, clicks, recovery attempts, auto-diagnosis, video + settings (name/size only), device, codec support, live canvas tests, console log, ffmpeg log. Opened automatically on failure; a toast for auto-fixed issues; "Report" button in the header.
+- Root cause of the user's "canvas tainted" error could not be reproduced in normal Chrome (http, file, sandboxed iframe all fine); likely an in-app browser / privacy feature / cloud-file source. The chain handles it regardless.
 
 ## 10. Future upgrades (ideas, biggest value first)
 
@@ -146,3 +154,10 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 - **Site redesign**: hero + live stats, step cards, Analysis Lab, Calibrate dialog, upload pack text, one-click Auto-make Shorts, light/dark theme, saved settings, installable + offline.
 - All earlier options kept (Classic method, custom lengths, trimmer, shapes, fit modes, crop sliders, speed, fade, mute, title, library, delete).
 - Honest limits: no OCR (cannot tell whose kill it is), profiles unverified on real games, ffmpeg export is slower than the clip.
+
+### Round 4 - Self-healing + error report (2026-11-16)
+- User reported: "Analysis failed: getImageData ... canvas has been tainted by cross-origin data". Asked for a fix, an automatic self-repair algorithm, and a copyable full error report pop-up.
+- New `js/diagnostics.js` (error report system, global error nets, live probes, auto-diagnosis), error dialog in `index.html`, styles in `style.css`, header "Report" button.
+- `engine.js`: frame-source chain with resume, ffmpeg audio fallback, sound-only last resort, thumbnail tolerates taint. `exporter.js`: `extractFrames`, `decodeAudioPCM`, ffmpeg log buffer. `app.js`: report wiring, `diagContext`, export retry recipes.
+- Tested by simulating the exact SecurityError: (a) original blob tainted -> memory reader recovered, 6/6 kills found; (b) all video tainted -> ffmpeg reader recovered; (c) ffmpeg blocked too -> sound-only partial + report. Older e2e suite still passes. `sw.js` cache v4.
+- Known: ffmpeg reader is slower (~10 s for the 70 s test clip at 2 fps) and adds one extra decoy event; real cause of the user's error still unconfirmed - the report will tell us.

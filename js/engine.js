@@ -114,15 +114,33 @@ const Engine = (function () {
   /* ===============================================================
      STAGE 1: AUDIO SCAN
      =============================================================== */
-  async function audioScan(file, ctl, progress) {
+  // Get the sound as numbers. Plan A: the browser's decoder. Plan B (self-healing): ffmpeg decodes it,
+  // which also handles audio codecs the browser does not know (AC-3, DTS...).
+  async function decodeAudio(v, rec, progress) {
+    const file = v.file;
     const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) throw new Error("This browser cannot read audio.");
-    // 16 kHz is plenty for gunshots and speech, and keeps memory small.
-    let ac;
-    try { ac = new Ctx({ sampleRate: 16000 }); } catch (e) { ac = new Ctx(); }
-    let buf;
-    try { buf = await ac.decodeAudioData(await file.arrayBuffer()); }
-    finally { if (ac.close) ac.close(); }
+    const s0 = performance.now();
+    try {
+      if (!Ctx) throw new Error("This browser cannot read audio.");
+      let ac;
+      try { ac = new Ctx({ sampleRate: 16000 }); } catch (e) { ac = new Ctx(); }   // 16 kHz is plenty for gunshots and speech
+      try { return await ac.decodeAudioData(await file.arrayBuffer()); }
+      finally { if (ac.close) ac.close(); }
+    } catch (e) {
+      rec.attempts.push({ step: "audio", strategy: "browser decodeAudioData", ok: false, error: (e.name || "Error") + ": " + e.message, ms: Math.round(performance.now() - s0) });
+      console.warn("Browser audio decode failed, trying ffmpeg:", e);
+    }
+    stageMark("analyse:audio", "ffmpeg fallback");
+    const s1 = performance.now();
+    progress && progress("Listening (compatibility decoder)...");
+    const pcm = await Exporter.decodeAudioPCM(v, (t) => progress && progress(t));      // throws if it fails too
+    rec.attempts.push({ step: "audio", strategy: "ffmpeg PCM decode", ok: true, ms: Math.round(performance.now() - s1) });
+    return { sampleRate: 16000, numberOfChannels: 1, length: pcm.length, getChannelData: () => pcm };
+  }
+
+  async function audioScan(v, ctl, progress, rec) {
+    stageMark("analyse:audio", "decoding");
+    const buf = await decodeAudio(v, rec, progress);
 
     const sr = buf.sampleRate;
     const c0 = buf.getChannelData(0), c1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
@@ -201,108 +219,212 @@ const Engine = (function () {
     return { x0, y0, x1, y1, area: (x1 - x0) * (y1 - y0) };
   }
 
-  async function visualScan(v, opts, ctl, progress) {
-    const vid = document.createElement("video");
-    vid.muted = true; vid.preload = "auto"; vid.playsInline = true; vid.src = v.url;
-    await whenLoaded(vid, 30000);
+  /* ---------------------------------------------------------------
+     FRAME SOURCES  (the self-healing part)
+     ---------------------------------------------------------------
+     WHY: the normal way to read a picture is: put the video in a <video>, copy a frame onto a
+     <canvas>, call getImageData. Some browsers / devices mark that canvas as "tainted" (cross-origin
+     data) and then getImageData throws a SecurityError. Instead of giving up, we keep a LIST of
+     different ways to get the same pixels and move down the list when one fails:
 
+        1. "browser"  - the normal <video> + canvas way (fast).
+        2. "memory"   - copy the file into memory first and play THAT copy. A fresh in-memory blob
+                        has no foreign origin, which fixes many tainted-canvas cases.
+        3. "ffmpeg"   - decode the file ourselves with ffmpeg (WebAssembly) and receive plain
+                        numbers. Numbers can never be tainted, so this always works (slower).
+
+     Every source has the same three functions:  open() , grab(i, t) , close().
+     grab() returns { px: whole picture RGBA, rp: { regionName: RGBA } }.                        */
+  function stageMark(name, info) { try { if (typeof Diag !== "undefined") Diag.stage(name, info); } catch (e) { /* ignore */ } }
+
+  function makeVideoSource(v, geom, label, makeUrl) {
+    let vid = null, handle = null, g = null, regs = {};
+    return {
+      name: label,
+      async open() {
+        handle = await makeUrl();
+        vid = document.createElement("video");
+        vid.muted = true; vid.preload = "auto"; vid.playsInline = true; vid.src = handle.url;
+        await whenLoaded(vid, 30000);
+        const cv = document.createElement("canvas"); cv.width = geom.W; cv.height = geom.H;
+        g = cv.getContext("2d", { willReadFrequently: true });
+        // Each box is read from the FULL-SIZE frame, so small text keeps its detail.
+        Object.keys(geom.regs).forEach((k) => {
+          const R = geom.regs[k], c = document.createElement("canvas"); c.width = R.w; c.height = R.h;
+          regs[k] = c.getContext("2d", { willReadFrequently: true });
+        });
+      },
+      async grab(i, t) {
+        await seekTo(vid, t);
+        g.drawImage(vid, 0, 0, geom.W, geom.H);
+        const px = g.getImageData(0, 0, geom.W, geom.H).data;           // <-- a tainted canvas throws HERE
+        const rp = {};
+        for (const k of Object.keys(geom.regs)) {
+          const R = geom.regs[k], r = R.r;
+          regs[k].drawImage(vid, r.x * vid.videoWidth, r.y * vid.videoHeight, r.w * vid.videoWidth, r.h * vid.videoHeight, 0, 0, R.w, R.h);
+          rp[k] = regs[k].getImageData(0, 0, R.w, R.h).data;
+        }
+        return { px, rp };
+      },
+      close() { try { if (vid) { vid.removeAttribute("src"); vid.load(); } } catch (e) { /* ignore */ } try { handle && handle.revoke && handle.revoke(); } catch (e) { /* ignore */ } vid = null; }
+    };
+  }
+
+  function makeFFmpegSource(v, geom, fps, progress) {
+    let frames = null, first = 0, count = 0;
+    // One chunk is decoded at a time so memory stays small (about 50 MB per chunk).
+    const perFrame = geom.W * geom.H * 4 + Object.keys(geom.regs).reduce((s, k) => s + geom.regs[k].w * geom.regs[k].h * 4, 0);
+    const chunkSec = Math.max(4, Math.min(60, Math.floor(50e6 / (perFrame * fps))));
+    return {
+      name: "ffmpeg",
+      async open() { await Exporter.loadEngine((t) => progress && progress(t)); },
+      async grab(i, t) {
+        if (!frames || i < first || i >= first + count) {
+          const start = Math.max(0, i / fps);
+          const specs = [{ w: geom.W, h: geom.H, crop: null }].concat(Object.keys(geom.regs).map((k) => ({ w: geom.regs[k].w, h: geom.regs[k].h, crop: geom.regs[k].r })));
+          progress && progress("Compatibility mode: decoding with ffmpeg from " + fmt(start) + "...");
+          frames = await Exporter.extractFrames(v, specs, start, Math.min(chunkSec, v.duration - start + 0.5), fps);
+          first = i; count = frames[0].length;
+          if (!count) throw new Error("ffmpeg returned no frames at " + start.toFixed(1) + " s");
+        }
+        const j = Math.min(count - 1, i - first), rp = {};
+        Object.keys(geom.regs).forEach((k, n) => (rp[k] = frames[n + 1][Math.min(frames[n + 1].length - 1, j)]));
+        return { px: frames[0][j], rp };
+      },
+      close() { frames = null; try { Exporter.unmountVideo(v); } catch (e) { /* ignore */ } }
+    };
+  }
+
+  // The memory source needs a blob URL made from a COPY of the file's bytes.
+  async function memoryURL(v) {
+    if (v.file.size > 1.2e9) throw new Error("file too big (" + Math.round(v.file.size / 1048576) + " MB) to copy into memory");
+    const buf = await v.file.arrayBuffer();
+    const url = URL.createObjectURL(new Blob([buf], { type: v.file.type || "video/mp4" }));
+    return { url, revoke: () => URL.revokeObjectURL(url) };
+  }
+
+  async function visualScan(v, opts, ctl, progress, rec) {
+    rec = rec || { attempts: [] };
     const fps = opts.fps, step = 1 / fps;
     const total = Math.max(1, Math.floor((v.duration - 0.05) * fps));
     const H = opts.height || 108;
-    const W = Math.max(16, Math.round((H * (vid.videoWidth / vid.videoHeight)) / 2) * 2);
-    const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
-    const g = cv.getContext("2d", { willReadFrequently: true });
-
-    // Each box (kill feed, banner, hit marker) is read from the FULL-SIZE frame at higher detail than the
-    // whole-frame picture, because small text turns to mush when the picture is shrunk too much.
+    // Picture sizes come from the info read when the video was added (v.w / v.h).
+    const W = Math.max(16, Math.round((H * (v.w / v.h)) / 2) * 2);
     const regs = {};
     Object.keys(opts.regions || {}).forEach((k) => {
       const r = opts.regions[k];
       const rw = clamp(Math.round(opts.regionWidth || 240), 64, 480);
-      const rh = clamp(Math.round((rw * (r.h * vid.videoHeight)) / Math.max(1, r.w * vid.videoWidth)), 24, 240);
-      const c = document.createElement("canvas"); c.width = rw; c.height = rh;
-      regs[k] = { r, w: rw, h: rh, area: rw * rh, g: c.getContext("2d", { willReadFrequently: true }), Y: new Uint8Array(rw * rh) };
+      const rh = clamp(Math.round((rw * (r.h * v.h)) / Math.max(1, r.w * v.w)), 24, 240);
+      regs[k] = { r, w: rw, h: rh, area: rw * rh, Y: new Uint8Array(rw * rh) };
     });
-    const regNames = Object.keys(regs);
-
+    const regNames = Object.keys(regs), geom = { W, H, regs };
     const n = W * H;
-    let prevY = new Uint8Array(n), curY = new Uint8Array(n);
-    let prevHist = null;
-    // We remember the PREVIOUS sample of each box. A kill-feed line or hit marker appearing is a sudden
-    // step up compared with the sample before it, so "rise" = how much it went up in one step.
+
+    // The list of ways to get pixels, best first. A source that failed earlier for this file is skipped.
+    v.deadSources = v.deadSources || {};
+    const chain = [
+      { name: "browser", make: () => makeVideoSource(v, geom, "browser", async () => ({ url: v.url })) },
+      { name: "memory", make: () => makeVideoSource(v, geom, "memory", () => memoryURL(v)) },
+      { name: "ffmpeg", make: () => makeFFmpegSource(v, geom, fps, (t) => progress && progress(0, 0, t)) }
+    ].filter((c) => !v.deadSources[c.name]);
+    if (opts.skipSources) opts.skipSources.forEach((nm) => { const k = chain.findIndex((c) => c.name === nm); if (k >= 0) chain.splice(k, 1); });
+
+    // State that must survive a switch of source (so we RESUME instead of starting over).
+    let prevY = new Uint8Array(n), curY = new Uint8Array(n), prevHist = null, havePrev = false;
     const last = {}; regNames.forEach((k) => (last[k] = { edge: 0, white: 0, init: false }));
     let lastRed = 0, redInit = false;
-
     const out = { t: new Float32Array(total), motion: new Float32Array(total), flash: new Float32Array(total),
                   red: new Float32Array(total), cut: new Uint8Array(total), pulse: {} };
     regNames.forEach((k) => (out.pulse[k] = new Float32Array(total)));
 
+    let i = 0;                       // the next sample to do (kept across sources)
     const t0 = performance.now();
-    for (let i = 0; i < total; i++) {
-      if (ctl.cancel) throw new Error(CANCEL);
-      const t = Math.min(v.duration - 0.03, i * step + 0.001);
-      await seekTo(vid, t);
-      g.drawImage(vid, 0, 0, W, H);
-      const px = g.getImageData(0, 0, W, H).data;
+    let lastErr = null;
 
-      // ---- whole-frame numbers ----
-      const hist = new Uint16Array(16);
-      let sumAbs = 0, flashN = 0, redN = 0;
-      for (let k = 0, p = 0; k < n; k++, p += 4) {
-        const r = px[p], gg = px[p + 1], b = px[p + 2];
-        const y = (77 * r + 150 * gg + 29 * b) >> 8;     // brightness of this pixel
-        curY[k] = y; hist[y >> 4]++;
-        if (i > 0) { const d = y - prevY[k]; sumAbs += d < 0 ? -d : d; if (d > 50) flashN++; }
-        if (r > 150 && gg < 90 && b < 90) redN++;
-      }
-      const motion = i > 0 ? sumAbs / (n * 255) : 0;
-      let cut = 0;
-      if (prevHist) { let hd = 0; for (let k = 0; k < 16; k++) hd += Math.abs(hist[k] - prevHist[k]); cut = hd / (2 * n) > 0.45 ? 1 : 0; }
-      const redFrac = redN / n;
-      const redRise = redInit ? Math.max(0, redFrac - lastRed - 0.003) : 0;
-      lastRed = redFrac; redInit = true;
+    for (const cand of chain) {
+      const src = cand.make(), s0 = performance.now(), startedAt = i;
+      stageMark("analyse:frames", cand.name + " source from sample " + i + "/" + total);
+      try {
+        progress && progress(i / total, 0, cand.name === "browser" ? undefined : "Switching to the " + cand.name + " reader...");
+        await src.open();
+        for (; i < total; i++) {
+          if (ctl.cancel) throw new Error(CANCEL);
+          const t = Math.min(v.duration - 0.03, i * step + 0.001);
+          const fr = await src.grab(i, t);
+          const px = fr.px;
 
-      // ---- region numbers (kill feed, banner, hit marker) ----
-      const flashFrac = i > 0 ? flashN / n : 0;
-      // The whole screen changed (scene cut, big camera whip, full-screen flash): do not trust region clues.
-      const hugeChange = cut === 1 || motion > 0.30 || flashFrac > 0.25;
-      for (const name of regNames) {
-        const R = regs[name], r = R.r;
-        R.g.drawImage(vid, r.x * vid.videoWidth, r.y * vid.videoHeight, r.w * vid.videoWidth, r.h * vid.videoHeight, 0, 0, R.w, R.h);
-        const rp = R.g.getImageData(0, 0, R.w, R.h).data, Yr = R.Y;
-        let edge = 0, white = 0;
-        for (let y = 0; y < R.h; y++) {
-          for (let x = 0, idx = y * R.w; x < R.w; x++, idx++) {
-            const q = idx * 4;
-            const y0 = (77 * rp[q] + 150 * rp[q + 1] + 29 * rp[q + 2]) >> 8;
-            Yr[idx] = y0;
-            if (x > 0) { const gx = y0 - Yr[idx - 1]; if (gx > 60 || gx < -60) edge++; }   // sharp, high-contrast edge = text-like
-            if (y0 > 215) white++;                                                          // very bright pixel
+          // ---- whole-frame numbers ----
+          const hist = new Uint16Array(16);
+          let sumAbs = 0, flashN = 0, redN = 0;
+          for (let k = 0, p = 0; k < n; k++, p += 4) {
+            const r = px[p], gg = px[p + 1], b = px[p + 2];
+            const y = (77 * r + 150 * gg + 29 * b) >> 8;     // brightness of this pixel
+            curY[k] = y; hist[y >> 4]++;
+            if (havePrev) { const d = y - prevY[k]; sumAbs += d < 0 ? -d : d; if (d > 50) flashN++; }
+            if (r > 150 && gg < 90 && b < 90) redN++;
+          }
+          const motion = havePrev ? sumAbs / (n * 255) : 0;
+          let cut = 0;
+          if (prevHist) { let hd = 0; for (let k = 0; k < 16; k++) hd += Math.abs(hist[k] - prevHist[k]); cut = hd / (2 * n) > 0.45 ? 1 : 0; }
+          const redFrac = redN / n;
+          const redRise = redInit ? Math.max(0, redFrac - lastRed - 0.003) : 0;
+          lastRed = redFrac; redInit = true;
+
+          // ---- region numbers (kill feed, banner, hit marker) ----
+          const flashFrac = havePrev ? flashN / n : 0;
+          // The whole screen changed (scene cut, big camera whip, full-screen flash): do not trust region clues.
+          const hugeChange = cut === 1 || motion > 0.30 || flashFrac > 0.25;
+          for (const name of regNames) {
+            const R = regs[name], rp = fr.rp[name], Yr = R.Y;
+            let edge = 0, white = 0;
+            for (let y = 0; y < R.h; y++) {
+              for (let x = 0, idx = y * R.w; x < R.w; x++, idx++) {
+                const q = idx * 4;
+                const y0 = (77 * rp[q] + 150 * rp[q + 1] + 29 * rp[q + 2]) >> 8;
+                Yr[idx] = y0;
+                if (x > 0) { const gx = y0 - Yr[idx - 1]; if (gx > 60 || gx < -60) edge++; }   // sharp, high-contrast edge = text-like
+                if (y0 > 215) white++;                                                          // very bright pixel
+              }
+            }
+            const ed = edge / R.area, wh = white / R.area, L = last[name];
+            let rise = 0;
+            if (L.init) {
+              const re = Math.max(0, ed - L.edge - 0.002);          // new sharp edges (text-like) since the last sample
+              const rw = Math.max(0, wh - L.white - 0.004);         // new very-bright pixels since the last sample
+              rise = name === "hit" ? rw + 0.5 * re : re;           // text by edges, hit marker by brightness
+            }
+            L.edge = ed; L.white = wh; L.init = true;
+            out.pulse[name][i] = hugeChange ? 0 : rise;
+          }
+
+          out.t[i] = t; out.motion[i] = motion; out.flash[i] = flashFrac; out.red[i] = redRise; out.cut[i] = cut;
+          const tmp = prevY; prevY = curY; curY = tmp; prevHist = hist; havePrev = true;
+
+          if (i % 5 === 0) {
+            const done = (i + 1) / total, el = (performance.now() - t0) / 1000;
+            progress && progress(done, el / done - el);       // fraction + estimated seconds left
+            await tick();
           }
         }
-        const ed = edge / R.area, wh = white / R.area, L = last[name];
-        let rise = 0;
-        if (L.init) {
-          const re = Math.max(0, ed - L.edge - 0.002);          // new sharp edges (text-like) since the last sample
-          const rw = Math.max(0, wh - L.white - 0.004);         // new very-bright pixels since the last sample
-          // Text lines are found by their edges. The hit marker is a bright flash, so it uses brightness.
-          rise = name === "hit" ? rw + 0.5 * re : re;
-        }
-        L.edge = ed; L.white = wh; L.init = true;
-        out.pulse[name][i] = hugeChange ? 0 : rise;
-      }
-
-      out.t[i] = t; out.motion[i] = motion; out.flash[i] = flashFrac; out.red[i] = redRise; out.cut[i] = cut;
-      const tmp = prevY; prevY = curY; curY = tmp; prevHist = hist;
-
-      if (i % 5 === 0) {
-        const done = (i + 1) / total, el = (performance.now() - t0) / 1000;
-        progress && progress(done, el / done - el);       // fraction + estimated seconds left
-        await tick();
+        // Finished with this source.
+        if (rec.attempts.length || cand.name !== "browser") rec.attempts.push({ step: "frames", strategy: cand.name, ok: true, ms: Math.round(performance.now() - s0), note: "samples " + startedAt + "-" + total });
+        rec.frameSource = cand.name;
+        src.close();
+        return out;
+      } catch (e) {
+        try { src.close(); } catch (x) { /* ignore */ }
+        if (e && e.message === CANCEL) throw e;
+        lastErr = e;
+        v.deadSources[cand.name] = true;
+        rec.attempts.push({ step: "frames", strategy: cand.name, ok: false, error: (e.name || "Error") + ": " + e.message, ms: Math.round(performance.now() - s0), note: "failed at sample " + i + " of " + total });
+        console.warn("Frame source '" + cand.name + "' failed at sample " + i + ":", e);
+        // Reset the "previous sample" memory so the first sample from the next source is not compared with a stale one.
+        havePrev = false; prevHist = null; redInit = false; regNames.forEach((k) => (last[k].init = false));
       }
     }
-    vid.removeAttribute("src"); vid.load();
-    return out;
+    const err = new Error("Every way of reading video pictures failed. Last error: " + (lastErr && lastErr.message));
+    err.name = "FrameReadError"; err.attempts = rec.attempts; err.cause = lastErr;
+    throw err;
   }
 
   /* ===============================================================
@@ -361,24 +483,38 @@ const Engine = (function () {
   async function analyse(v, opts, ctl, progress) {
     ctl = ctl || {};
     const t0 = performance.now();
-    let au = null, vis = null, audioOk = false;
+    const rec = { attempts: [], notes: [] };            // everything the self-healing code tried (goes into reports)
+    let au = null, vis = null, audioOk = false, partial = false;
 
     if (opts.useAudio !== false) {
       progress && progress(0.02, "Listening to every audio sample...");
       try {
         if (v.file.size > 1.5e9) throw new Error("file too big to decode audio");
-        au = await audioScan(v.file, ctl, (f) => progress && progress(0.02 + 0.23 * f, "Listening to every audio sample..."));
+        au = await audioScan(v, ctl, (f) => progress && progress(typeof f === "number" ? 0.02 + 0.23 * f : 0.02, typeof f === "string" ? f : "Listening to every audio sample..."), rec);
         audioOk = true;
       } catch (e) {
         if (e.message === CANCEL) throw e;
         console.warn("Audio scan skipped:", e);
+        rec.attempts.push({ step: "audio", strategy: "give up on sound", ok: false, error: (e.name || "Error") + ": " + e.message });
+        rec.notes.push("The sound could not be read, so the picture alone was used.");
         au = null;
       }
     }
 
     if (opts.useVisual !== false) {
-      vis = await visualScan(v, opts, ctl, (f, eta) =>
-        progress && progress(0.25 + 0.7 * f, "Watching frames... " + Math.round(f * 100) + "%" + (eta > 1 ? "  (about " + fmt(eta) + " left)" : "")));
+      try {
+        vis = await visualScan(v, opts, ctl, (f, eta, text) =>
+          progress && progress(0.25 + 0.7 * f, text || ("Watching frames... " + Math.round(f * 100) + "%" + (eta > 1 ? "  (about " + fmt(eta) + " left)" : ""))), rec);
+      } catch (e) {
+        if (e.message === CANCEL) throw e;
+        // LAST RESORT: pictures cannot be read at all. If we have sound, finish with sound only and say so.
+        if (au) {
+          partial = true; vis = null;
+          rec.attempts.push({ step: "frames", strategy: "sound-only analysis", ok: true, note: "pictures unreadable, using audio only" });
+          rec.notes.push("Pictures could not be read by any method, so the result uses SOUND ONLY (no kill-feed / banner clues).");
+          stageMark("analyse:audio-only", "visual scan gave up");
+        } else { e.attempts = rec.attempts; throw e; }
+      }
     }
 
     progress && progress(0.96, "Building time lines...");
@@ -391,7 +527,7 @@ const Engine = (function () {
 
     return {
       dt: DT, N: chData.nG, ch: chData.ch, onsets: chData.onsets, audioOk,
-      hasVisual: !!vis, fps: opts.fps, regions: opts.regions || {}, profileId: opts.profile,
+      hasVisual: !!vis, partial, recovery: rec, fps: opts.fps, regions: opts.regions || {}, profileId: opts.profile,
       loudSec, motionSec, seconds: (performance.now() - t0) / 1000, duration: v.duration
     };
   }
@@ -630,7 +766,9 @@ const Engine = (function () {
     const cv = document.createElement("canvas"); cv.width = 160; cv.height = Math.round((160 * vid.videoHeight) / vid.videoWidth) || 90;
     cv.getContext("2d").drawImage(vid, 0, 0, cv.width, cv.height);
     vid.removeAttribute("src"); vid.load();
-    return cv.toDataURL("image/jpeg", 0.7);
+    // A tainted canvas refuses toDataURL too. The picture is only decoration, so we just skip it.
+    try { return cv.toDataURL("image/jpeg", 0.7); }
+    catch (e) { console.warn("Thumbnail skipped (canvas is protected):", e.message); return ""; }
   }
 
   return { analyse, detect, buildClips, classic, thumbnail, DT, CANCEL, quietPoint };

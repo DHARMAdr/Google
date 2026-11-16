@@ -194,3 +194,12 @@ footer { text-align: center; color: var(--muted); font-size: .82rem; padding: 22
   .top { justify-content: space-between; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
+
+/* ---------- error report dialog ---------- */
+.badge { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 99px; background: var(--danger); color: #111; font-size: .7rem; text-align: center; }
+.err-text { width: 100%; height: min(52vh, 440px); margin-top: 6px; background: var(--bg, #0b0d12); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: .78rem/1.45 ui-monospace, Menlo, Consolas, monospace; resize: vertical; white-space: pre; }
+.err-sum { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); font-size: .9rem; word-break: break-word; }
+.err-sum.good { border-color: var(--ok); color: var(--ok); }
+.err-sum.warn { border-color: var(--warn); color: var(--warn); }
+.err-sum.bad { border-color: var(--danger); color: var(--danger); }
+.toast.clickable { cursor: pointer; }

@@ -43,6 +43,7 @@
   </nav>
   <div class="tools">
     <button class="ghost small" id="installBtn" hidden>Install app</button>
+    <button class="ghost small" id="reportBtn" title="Open the last error report, or run a quick system check">Report <span class="badge" id="reportBadge" hidden>0</span></button>
     <button class="ghost small" id="themeBtn" title="Switch light / dark">Theme</button>
   </div>
 </header>
@@ -384,6 +385,23 @@
   </div>
 </dialog>
 
+<!-- ======================= ERROR REPORT DIALOG (filled in by js/diagnostics.js) ======================= -->
+<dialog id="errDlg">
+  <h3 id="errTitle" style="margin:0 0 6px">Error report</h3>
+  <div id="errSummary" class="err-sum"></div>
+  <p class="muted small" style="margin:6px 0">This report holds everything needed to fix the problem: the error, what the app was doing, the automatic fixes it already tried, your device and a few live tests. It never contains your video, only its name, size and format. Press <b>Copy full report</b>, then paste it to Claude.</p>
+  <label for="errSel" class="small muted" style="margin-top:4px">Reports in this visit</label>
+  <select id="errSel"></select>
+  <textarea id="errText" class="err-text" readonly spellcheck="false"></textarea>
+  <div class="row" style="margin-top:10px">
+    <button id="errCopy">Copy full report</button>
+    <button class="ghost" id="errDownload">Download .txt</button>
+    <button class="ghost" id="errRefresh">Re-run live tests</button>
+    <button class="ghost" id="errClose">Close</button>
+  </div>
+</dialog>
+
+<script src="js/diagnostics.js"></script>
 <script src="js/util.js"></script>
 <script src="js/profiles.js"></script>
 <script src="js/engine.js"></script>
