@@ -40,7 +40,7 @@
 const Diag = (function () {
   "use strict";
 
-  const APP_VERSION = "3.1.0";
+  const APP_VERSION = "3.3.0";
   const START = Date.now();
   const logs = [];            // recent console lines
   const crumbs = [];          // recent clicks and stage changes
@@ -404,17 +404,17 @@ const Diag = (function () {
     if (provider) getContext = provider;
     const d = ensureDom();
     const cur = () => reports[d.sel && d.sel.value !== "" ? +d.sel.value : reports.length - 1];
-    const flash = (btn, text) => { const o = btn.textContent; btn.textContent = text; setTimeout(() => (btn.textContent = o), 1600); };
+    const flash = (btn, text) => { if (!btn) return; const o = btn.textContent; btn.textContent = text; setTimeout(() => (btn.textContent = o), 1600); };
     const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
-    on("errCopy", async (e) => { const ok = await copy(d.text.value); flash(e.currentTarget, ok ? "Copied!" : "Select + copy manually"); if (!ok) { d.text.focus(); d.text.select(); } });
+    on("errCopy", async (e) => { const btn = e.currentTarget; const ok = await copy(d.text.value); flash(btn, ok ? "Copied!" : "Select + copy manually"); if (!ok) { d.text.focus(); d.text.select(); } });
     on("errDownload", () => {
       const blob = new Blob([d.text.value], { type: "text/plain" }), a = document.createElement("a");
       a.href = URL.createObjectURL(blob); a.download = "clipcutter-error-report-" + ((cur() && cur().id) || "manual") + ".txt";
       document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 30000);
     });
     on("errRefresh", async (e) => {
-      const entry = cur(); if (!entry) return;
-      flash(e.currentTarget, "Running tests...");
+      const btn = e.currentTarget, entry = cur(); if (!entry) return;
+      flash(btn, "Running tests...");
       let ctx = {}; try { ctx = getContext() || {}; } catch (x) { /* ignore */ }
       entry.text = buildText(entry, envSnapshot(), capabilities(), await runProbes(ctx), ctx);
       d.text.value = entry.text;

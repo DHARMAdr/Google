@@ -800,12 +800,13 @@ function clipFileName(v, clip, ext) {
 }
 
 // Export ONE clip. Returns true when finished, false if cancelled or failed.
-async function exportClip(v, clip) {
+async function exportClip(v, clip, worker, quiet) {
+  worker = worker || Exporter;
   const base = readExport();
   if (v.noPlay && base.engine === "fast") base.engine = "hq";      // the real-time recorder needs a playable video
   const card = $("clipList").querySelector(`.clip[data-id="${clip.id}"]`);
   const barEl = card && card.querySelector('[data-role="bar"]');
-  const say = (t) => { clip.status = t; if (!clip.out) updateClipCard(clip); setEStatus(t); };
+  const say = (t) => { clip.status = t; if (!clip.out) updateClipCard(clip); if (!quiet) setEStatus(t); };
   if (clip.out) { URL.revokeObjectURL(clip.out.url); clip.out = null; }
   if (barEl) barEl.style.width = "0%";
   say("Preparing...");
@@ -826,11 +827,11 @@ async function exportClip(v, clip) {
   for (let k = 0; k < recipes.length; k++) {
     const rcp = recipes[k], s0 = performance.now();
     try {
-      if (k > 0) { say("Retrying with " + rcp.name + "..."); try { Exporter.cancel(); } catch (e) { /* reset the engine */ } eCtl.cancel = false; }
-      const r = await Exporter.exportClip(v, clip, rcp.o, {
+      if (k > 0) { say("Retrying with " + rcp.name + "..."); try { worker.cancel(); } catch (e) { /* reset the engine */ } eCtl.cancel = false; }
+      const r = await worker.exportClip(v, clip, rcp.o, {
         ctl: eCtl, hiddenVideo: $("exportVideo"),
         status: say,
-        progress: (f, eta) => { if (barEl) barEl.style.width = Math.round(f * 100) + "%"; $("eBar").style.width = Math.round(f * 100) + "%"; if (eta > 2) setEStatus((clip.status || "").split("  (")[0] + "  (about " + fmt(eta) + " left)"); }
+        progress: (f, eta) => { if (barEl) barEl.style.width = Math.round(f * 100) + "%"; if (!quiet) $("eBar").style.width = Math.round(f * 100) + "%"; if (eta > 2 && !quiet) setEStatus((clip.status || "").split("  (")[0] + "  (about " + fmt(eta) + " left)"); }
       });
       clip.out = { url: URL.createObjectURL(r.blob), name: clipFileName(v, clip, r.ext), size: r.blob.size, ext: r.ext };
       if (barEl) barEl.style.width = "100%";
@@ -867,24 +868,44 @@ async function exportOne(clip) {
   if (ok) { setEStatus("Export finished. Download it from the clip card.", 1); toast("Clip exported."); }
 }
 
+// How many clips can be exported at the same time on THIS device (each needs its own ffmpeg engine).
+function exportWorkers(n) {
+  const cores = navigator.hardwareConcurrency || 4, mem = navigator.deviceMemory || 4;
+  let k = Math.floor(cores / 3);                    // keep cores free for the page itself
+  if (mem <= 4) k = Math.min(k, 2);
+  if (mem <= 2) k = 1;
+  return Math.max(1, Math.min(3, k, n));
+}
+const allWorkers = [];                              // every extra export engine we started
+
 async function exportAll() {
   if (exporting || !cur || !cur.clips.length) return 0;
   const v = cur, list = [...v.clips];
   eCtl = { cancel: false };
   setExporting(true);
-  let done = 0;
-  for (let i = 0; i < list.length; i++) {
-    if (v.deleted || eCtl.cancel) break;
-    setEStatus("Exporting clip " + (i + 1) + " of " + list.length + "...", i / list.length);
-    if (await exportClip(v, list[i])) done++; else if (eCtl.cancel) break;
-  }
+  const base = readExport();
+  const par = base.engine === "hq" ? exportWorkers(list.length) : 1;     // only the ffmpeg engine can run in parallel
+  const pool = [Exporter];
+  while (pool.length < par) { const w = Exporter.spawn(); allWorkers.push(w); pool.push(w); }
+  let done = 0, finished = 0, next = 0;
+  const upd = () => setEStatus((par > 1 ? "Exporting " + par + " clips at once. " : "Exporting. ") + finished + " of " + list.length + " finished...", finished / list.length);
+  upd();
+  await Promise.all(pool.map(async (w) => {
+    while (next < list.length && !v.deleted && !eCtl.cancel) {
+      const clip = list[next++];
+      const ok = await exportClip(v, clip, w, par > 1);
+      finished++; if (ok) done++; upd();
+    }
+  }));
+  // Free the extra engines (they hold memory).
+  allWorkers.splice(0).forEach((w) => { try { w.cancel(); } catch (e) { /* ignore */ } });
   setExporting(false);
   setEStatus(eCtl.cancel ? "Export cancelled." : done + " of " + list.length + " clips exported. Download them from the cards or as a ZIP.", eCtl.cancel ? 0 : 1);
   return done;
 }
 
 $("exportAllBtn").addEventListener("click", exportAll);
-$("cancelBtn").addEventListener("click", () => { eCtl.cancel = true; Exporter.cancel(); });
+$("cancelBtn").addEventListener("click", () => { eCtl.cancel = true; Exporter.cancel(); allWorkers.forEach((w) => { try { w.cancel(); } catch (e) { /* ignore */ } }); });
 
 $("zipBtn").addEventListener("click", async () => {
   const files = [];

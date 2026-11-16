@@ -121,6 +121,14 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 - **Any format**: if the browser cannot play the file (AVI, MKV, HEVC, video-track-less metadata...), `Exporter.probeInfo` reads length/size with ffmpeg, `v.noPlay=true`, analysis goes straight to the ffmpeg frame reader and audio via ffmpeg, export uses ffmpeg (Fast recorder auto-switches to Best quality), thumbnail via ffmpeg, and an optional "Make preview copy" (480p H.264) lets you watch it.
 - `errText()` turns any thrown thing into readable text (fixes `[object Object]` and `undefined` in reports).
 
+## 9d. Speed layer (Round 6)
+
+- **Stream reader** (`engine.js makeVideoSource mode "stream"`): the hidden video is PLAYED muted at up to 8x and a picture is grabbed with `requestVideoFrameCallback` when the time reaches each sample (no seeking, hardware decoder). Speed controller slows down if samples arrive late. 12 s watchdog (ignores hidden tab) -> falls to the next reader.
+- **Parallel parts**: video is split into N parts, N from `navigator.hardwareConcurrency` / `deviceMemory` (max 3, 1 for short clips or <=2 GB). Each part has its own `makeProcessor` and a "priming" sample so no gap at the joins. Unfinished parts continue through the chain seek -> memory -> ffmpeg, resuming at the same sample.
+- Header-only wait (`whenMeta`) replaces "wait for first picture" (it hung 30 s on Android Chrome).
+- **Parallel export**: `Exporter` is now a factory (`make`, `Exporter.spawn()`); `exportAll` runs up to 3 ffmpeg engines at once (by cores/RAM). Output size never upscales small sources (min of chosen size and max(720, source)).
+- Fixed report-dialog bug (`e.currentTarget` null after await). Version 3.3.0, SW cache v6.
+
 ## 10. Future upgrades (ideas, biggest value first)
 
 1. **OCR of the kill feed** (tesseract.js) to keep only the player's own kills by name.
@@ -173,3 +181,9 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 - Added `compat.js` (stable copy, wake lock), ffmpeg probe / preview copy / thumbnail for unplayable formats, probe rejects files with sound but no decodable picture, better media-error text, readable attempt errors, report shows copy method and codec. SW cache v5.
 - Tested: MP4 (browser reader), AVI (mpeg4+mp3) and HEVC mp4 (ffmpeg reader, export, preview copy), simulated taint cases (all still recover). Not testable here: real Android permission revocation (the stable copy is the fix by design).
 - Note: 36-minute video at 5 fps = ~10,800 samples; on a phone use 2 fps (Fast) first.
+
+### Round 6 - Speed (2026-11-16)
+- User report: analysis "still loading" on Pixel (36 min, 768x480): browser reader timed out at 30 s, memory copy stalled; Copy button crashed.
+- Added stream reader + parallel parts + device-based worker count, parallel export, no-upscale size cap, fixes above.
+- Measured here (desktop Chrome): 280 s clip analysis 53 s with seek vs 17.6 s with 3 parallel stream parts (same kills). Export of 3 clips (quick preset): 145 s with 1 engine, 97 s with 3 (sandbox has few cores). Taint/AVI/HEVC recovery tests still pass.
+- Not verified on the real phone. Biggest remaining cost: x264 in WebAssembly (single thread per engine). Next idea: WebCodecs hardware encoder.

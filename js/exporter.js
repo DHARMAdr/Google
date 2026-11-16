@@ -30,8 +30,11 @@
      - Use the multi-threaded ffmpeg core (needs special server headers).
    ===================================================================== */
 
+// make() builds ONE independent export engine (its own ffmpeg). The page keeps a main one and can
+// start extra ones (Exporter.spawn) to export several clips at the same time on a many-core device.
 const Exporter = (function () {
   "use strict";
+  function make() {
 
   let ff = null;               // the running ffmpeg instance
   let loading = null;          // a promise while ffmpeg is still loading
@@ -51,7 +54,8 @@ const Exporter = (function () {
 
   // Output picture size for the chosen shape and resolution.
   function outSize(o, vw, vh) {
-    const base = parseInt(o.res, 10) || 1080;           // width for vertical shapes, height for landscape
+    // Never blow a small video up: asking for 1080 from a 768x480 file only costs time, not quality.
+    const base = Math.min(parseInt(o.res, 10) || 1080, Math.max(720, o.shape === "16:9" ? vh : vw));   // width for vertical shapes, height for landscape
     if (o.shape === "original") return [even(vw), even(vh)];
     if (o.shape === "9:16") return [even(base), even((base * 16) / 9)];
     if (o.shape === "4:5") return [even(base), even((base * 5) / 4)];
@@ -500,4 +504,8 @@ const Exporter = (function () {
   }
 
   return { exportClip, cancel, unmountVideo, makeZip, outSize, loadEngine, extractFrames, decodeAudioPCM, getLog, probeInfo, makeProxy, thumbFF };
+  }
+  const main = make();
+  main.spawn = make;
+  return main;
 })();
