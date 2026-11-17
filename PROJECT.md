@@ -231,3 +231,7 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 ### Round 9c - Stream stall retry + tighter windows (2026-11-17)
 - Report CC-MWKAJBVK (Pixel 9a, 36 min): all 3 stream readers stalled together after ~2 min ("no pictures for 12 s"), analysis dropped to the slow seek reader; two-stage mode was not used (gunfire >75% of the video).
 - Fix: after a stall, unfinished parts are retried one at a time at half, then quarter speed before falling to seek. Gunfire windows now tighten progressively (strongest shots only, narrower) until <=55% of the video is watched. Retry path not reproducible here (needs a real phone); synthetic test unchanged (46 s of 120 s watched, 6/6 kills).
+
+### Round 10 - Cloudflare storage server (2026-11-17)
+- User asked for a new Cloudflare storage server. Added `cloudflare-storage/` (Worker + R2): same /api as server/ for upload (8 MB pieces, resumable), info, delete, purge, hourly TTL sweep; `canRender:false`, jobs -> 501. Tested with a fake R2 bucket in Node (upload, resume checks, complete, delete). NOT deployed (needs the user's Cloudflare login) and not tested from the real site.
+- Client: Cloud.test stores `canRender`; the "Cloud server" export choice is hidden for storage-only servers (`Cloud.canRender()`).

@@ -926,11 +926,11 @@ async function exportOne(clip) {
 
 /* ---------- CLOUD SERVER EXPORT (js/cloud.js + /server) ---------- */
 function refreshCloudUI() {
-  const on = Cloud.enabled(), sel = $("engineSel");
+  const on = Cloud.enabled() && Cloud.canRender(), sel = $("engineSel");      // a storage-only server (Cloudflare R2) cannot render, so the "Cloud server" export choice is hidden
   let opt = sel.querySelector('option[value="cloud"]');
   if (on && !opt) { opt = document.createElement("option"); opt.value = "cloud"; opt.textContent = "Cloud server - renders on your server, keeps going if you close the page"; sel.appendChild(opt); }
   if (!on && opt) { if (sel.value === "cloud") sel.value = Exporter.turboAvailable() ? "turbo" : "hq"; opt.remove(); }
-  $("cloudDot").hidden = !on;
+  $("cloudDot").hidden = !Cloud.enabled();
   syncUI();
 }
 

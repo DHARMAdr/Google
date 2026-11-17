@@ -94,6 +94,7 @@ const Cloud = (function () {
     }
     const good = out.results.filter((r) => r.ok).sort((a, b) => a.ms - b.ms);
     if (good.length) { out.ok = true; active = good[0].base; }
+    if (out.info) { try { store.set("cloudCanRender", out.info.canRender !== false); } catch (e) { /* ignore */ } }   // storage-only servers (Cloudflare R2) cannot render
     return out;
   }
 
@@ -192,5 +193,6 @@ const Cloud = (function () {
   }
   async function purge() { return call("POST", "/api/purge"); }
 
-  return { enabled, getConfig, setConfig, test, upload, submit, jobs, cancelJobs, status, download, remove, flushDeletes, purge, pendingDeletes, CloudError };
+  const canRender = () => { try { return store.get("cloudCanRender", true) !== false; } catch (e) { return true; } };
+  return { canRender, enabled, getConfig, setConfig, test, upload, submit, jobs, cancelJobs, status, download, remove, flushDeletes, purge, pendingDeletes, CloudError };
 })();

@@ -1,0 +1,19 @@
+# Cloudflare Worker settings for the ClipCutter storage server.
+name = "clipcutter-storage"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# The R2 bucket that holds the videos (create it first: wrangler r2 bucket create clipcutter-storage)
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "clipcutter-storage"
+
+# Settings (not secret). The TOKEN is a secret: wrangler secret put TOKEN
+[vars]
+ALLOWED_ORIGINS = "https://dharmadr.github.io"
+TTL_HOURS = "48"      # videos are removed this many hours after last use
+MAX_GB = "8"          # total storage limit
+
+# Clean-up every hour
+[triggers]
+crons = ["0 * * * *"]

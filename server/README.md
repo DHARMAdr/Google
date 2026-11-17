@@ -29,7 +29,7 @@ Use the Dockerfile above as the container image behind a Worker that forwards `/
 Mount or attach storage for `DATA_DIR` (container disk is wiped when it sleeps, so uploads would be lost:
 use a persistent volume or keep it awake). Not tested by the author.
 
-NOTE: a plain Cloudflare Worker cannot run ffmpeg. Workers + R2 alone can store files but not render them.
+NOTE: a plain Cloudflare Worker cannot run ffmpeg. For STORAGE only on Cloudflare, see ../cloudflare-storage/README.md.
 
 ## Settings (environment variables)
 | name | default | meaning |
