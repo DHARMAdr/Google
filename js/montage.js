@@ -149,7 +149,7 @@
     const muxer = new mod.Muxer({ target: new mod.ArrayBufferTarget(), video: { codec: "avc", width: W, height: H },
       audio: audioOk ? { codec: "aac", numberOfChannels: 2, sampleRate: SR } : undefined, fastStart: "in-memory", firstTimestampBehavior: "offset" });
     let encErr = null;
-    const venc = new VideoEncoder({ output: (ch, m) => { try { muxer.addVideoChunk(ch, m); } catch (e) { encErr = e; } }, error: (e) => { encErr = e; } });
+    const venc = new VideoEncoder({ output: (ch, m) => { try { if (Number.isFinite(ch.duration) && ch.duration >= 0) muxer.addVideoChunk(ch, m); else { const d = new Uint8Array(ch.byteLength); ch.copyTo(d); muxer.addVideoChunkRaw(d, ch.type, ch.timestamp, Math.round(1e6 / FPS), m); } } catch (e) { encErr = e; } }, error: (e) => { encErr = e; } });
     venc.configure(cfg);
     let aenc = null;
     const sink = [];                                  // sound pieces when the browser cannot encode AAC itself
@@ -197,7 +197,7 @@
               try {
                 paint(g, small, sg, vid, W, H, fit);
                 if (fade > 0) { const f = Math.min(fade, dur / 3), a = t < f ? 1 - t / f : t > dur - f ? 1 - (dur - t) / f : 0; if (a > 0) { g.fillStyle = "rgba(0,0,0," + Math.min(1, a) + ")"; g.fillRect(0, 0, W, H); } }
-                const fr = new VideoFrame(cv, { timestamp: Math.round((offset + t) * 1e6) });
+                const fr = new VideoFrame(cv, { timestamp: Math.round((offset + t) * 1e6), duration: Math.round(1e6 / FPS) });
                 venc.encode(fr, { keyFrame: frames % (FPS * 2) === 0 }); fr.close(); frames++;
                 if (frames % 8 === 0) { const f = (offset + t) / totalLen; $("mBar").style.width = Math.round(f * 95) + "%"; }
                 if (venc.encodeQueueSize > 12) { vid.pause(); const back = () => { if (venc.encodeQueueSize <= 3) { venc.removeEventListener("dequeue", back); vid.play().catch(() => {}); } }; venc.addEventListener("dequeue", back); }

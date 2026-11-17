@@ -417,8 +417,67 @@ const Engine = (function () {
      THE PER-SAMPLE MATH, kept in one small object so every segment of the video can have its own.
      step(i, t, frame, write): turns one picture into the numbers (motion, flash, red, region pulses).
      write=false is used for the "priming" sample: it only fills the "previous picture" memory.      */
-  function makeProcessor(geom, regs, regNames, out) {
+  /* ---------------------------------------------------------------
+     NAME TEMPLATE (the "Teach it my name" feature)
+     The user draws a box around THEIR OWN name (+ agent icon) in one kill-feed line. We keep that
+     little picture (gray values) and look for it in the kill-feed area of every sampled frame.
+     Own kills show the same name, so this recognises "my kill" without reading any text (no OCR).
+     How: normalised cross-correlation (NCC) = "how much does this patch look like the template",
+     1 = identical, 0 = unrelated. Done on every 2nd pixel and every 2nd position to stay fast.
+     HOW TO IMPROVE: also match colour, several scales (if the video resolution changes), use OCR.
+     --------------------------------------------------------------- */
+  const MATCH_MIN = 0.55;                                   // NCC needed to say "my name is here"
+  function scaleTemplate(tpl, s) {
+    const w = Math.max(6, Math.round(tpl.w * s)), h = Math.max(4, Math.round(tpl.h * s));
+    const a = document.createElement("canvas"); a.width = tpl.w; a.height = tpl.h;
+    const ag = a.getContext("2d"), id = ag.createImageData(tpl.w, tpl.h);
+    for (let k = 0; k < tpl.gray.length; k++) { id.data[4 * k] = id.data[4 * k + 1] = id.data[4 * k + 2] = tpl.gray[k]; id.data[4 * k + 3] = 255; }
+    ag.putImageData(id, 0, 0);
+    const b = document.createElement("canvas"); b.width = w; b.height = h;
+    const bg = b.getContext("2d", { willReadFrequently: true }); bg.imageSmoothingEnabled = true; bg.imageSmoothingQuality = "high";
+    bg.drawImage(a, 0, 0, w, h);
+    const d = bg.getImageData(0, 0, w, h).data;
+    const nx = Math.ceil(w / 2), ny = Math.ceil(h / 2), z = new Float32Array(nx * ny);
+    let sum = 0;
+    for (let ty = 0, k = 0; ty < ny; ty++) for (let tx = 0; tx < nx; tx++, k++) { z[k] = d[4 * ((ty * 2) * w + tx * 2)]; sum += z[k]; }
+    const mean = sum / z.length; let ss = 0;
+    for (let k = 0; k < z.length; k++) { z[k] -= mean; ss += z[k] * z[k]; }
+    return { w, h, nx, ny, z, ss: Math.max(ss, 1e-6) };
+  }
+  // Slide the template over the region picture. Returns the best score and how many separate lines match.
+  function matchTemplate(Y, W, H, T) {
+    const n = T.nx * T.ny, rowBest = new Float32Array(H).fill(-1);
+    for (let y = 0; y + T.h <= H; y += 2) {
+      let best = -1;
+      for (let x = 0; x + T.w <= W; x += 2) {
+        let sI = 0, sII = 0, sIT = 0, k = 0;
+        for (let ty = 0; ty < T.ny; ty++) {
+          let idx = (y + ty * 2) * W + x;
+          for (let tx = 0; tx < T.nx; tx++, k++, idx += 2) { const iv = Y[idx]; sI += iv; sII += iv * iv; sIT += iv * T.z[k]; }
+        }
+        const varI = sII - (sI * sI) / n;
+        if (varI < n * 80) continue;                         // flat patch: no text here
+        const ncc = sIT / Math.sqrt(varI * T.ss);
+        if (ncc > best) best = ncc;
+      }
+      rowBest[y] = best;
+    }
+    let count = 0, top = -1;
+    for (let rep = 0; rep < 5; rep++) {                      // pick the best line, hide its neighbours, repeat
+      let by = -1, bv = MATCH_MIN;
+      for (let y = 0; y < H; y++) if (rowBest[y] >= bv) { bv = rowBest[y]; by = y; }
+      if (by < 0) break;
+      if (rep === 0) top = bv;
+      count++;
+      for (let y = Math.max(0, by - T.h); y <= Math.min(H - 1, by + T.h); y++) rowBest[y] = -1;
+    }
+    return { best: top, count };
+  }
+
+  function makeProcessor(geom, regs, regNames, out, tpl) {
     const n = geom.W * geom.H;
+    let T = null;
+    if (tpl && regs.killfeed) T = scaleTemplate(tpl, regs.killfeed.w / (regs.killfeed.r.w * tpl.vw));
     let prevY = new Uint8Array(n), curY = new Uint8Array(n), prevHist = null, havePrev = false, lastRed = 0, redInit = false;
     const last = {}, Ybuf = {};
     regNames.forEach((k) => { last[k] = { edge: 0, white: 0, init: false }; Ybuf[k] = new Uint8Array(regs[k].w * regs[k].h); });
@@ -463,6 +522,7 @@ const Engine = (function () {
         }
         L.edge = ed; L.white = wh; L.init = true;
         if (write) out.pulse[name][i] = hugeChange ? 0 : rise;
+        if (write && T && name === "killfeed" && R.w >= T.w && R.h >= T.h) { const m = matchTemplate(Yr, R.w, R.h, T); out.mine[i] = m.best; out.mineN[i] = m.count; }
       }
       if (write) { out.mask[i] = 1; out.t[i] = t; out.motion[i] = motion; out.flash[i] = flashFrac; out.red[i] = redRise; out.cut[i] = cut; }
       const tmp = prevY; prevY = curY; curY = tmp; prevHist = hist; havePrev = true;
@@ -501,7 +561,7 @@ const Engine = (function () {
     });
     const regNames = Object.keys(regs), geom = { W, H, regs };
     const out = { t: new Float32Array(total), motion: new Float32Array(total), flash: new Float32Array(total),
-                  red: new Float32Array(total), cut: new Uint8Array(total), mask: new Uint8Array(total), pulse: {} };
+                  red: new Float32Array(total), cut: new Uint8Array(total), mask: new Uint8Array(total), mine: new Float32Array(total).fill(-1), mineN: new Uint8Array(total), hasTpl: !!opts.tpl, pulse: {} };
     regNames.forEach((k) => (out.pulse[k] = new Float32Array(total)));
     v.deadSources = v.deadSources || {};
     const t0 = performance.now();
@@ -537,7 +597,7 @@ const Engine = (function () {
     // Run one part with one source from seg.cur to seg.b. Throws when the source breaks (seg.cur stays correct).
     async function runSeg(seg, src, label) {
       stageMark("analyse:frames", label + " samples " + seg.cur + "-" + seg.b + "/" + total);
-      const proc = makeProcessor(geom, regs, regNames, out);
+      const proc = makeProcessor(geom, regs, regNames, out, opts.tpl);
       let first = true;
       try {
         // PRIMING: look at the sample just before, only to fill the "previous picture" memory, so a restart leaves no gap.
@@ -643,6 +703,8 @@ const Engine = (function () {
                   flash: new Float32Array(nG), red: new Float32Array(nG), motion: new Float32Array(nG),
                   cut: new Float32Array(nG), burst: new Float32Array(nG), boom: new Float32Array(nG), loud: new Float32Array(nG) };
 
+    let mineA = null, mineC = null;
+    if (vis && vis.hasTpl) { mineA = new Float32Array(nG).fill(-1); mineC = new Uint8Array(nG); }
     if (vis) {
       for (let i = 0; i < vis.t.length; i++) {
         if (vis.mask && !vis.mask[i]) continue;          // two-stage mode: this sample was skipped on purpose
@@ -651,6 +713,7 @@ const Engine = (function () {
         raw.flash[j] = Math.max(raw.flash[j], vis.flash[i]);
         raw.red[j] = Math.max(raw.red[j], vis.red[i]);
         raw.cut[j] = Math.max(raw.cut[j], vis.cut[i]);
+        if (mineA) { mineA[j] = Math.max(mineA[j], vis.mine[i]); mineC[j] = Math.max(mineC[j], vis.mineN[i]); }
         for (const k of Object.keys(vis.pulse)) raw[k][j] = Math.max(raw[k][j], vis.pulse[k][i]);
       }
       // At low frame rates a clue lasts longer than one sample, so hold motion over empty cells.
@@ -681,6 +744,11 @@ const Engine = (function () {
     const ch = {};
     for (const k of Object.keys(raw)) ch[k] = k === "cut" ? raw[k] : scaleTo01(raw[k], FLOORS[k] || 1e-6);
     ch.loud = smoothArr(ch.loud, 2);
+    if (mineA) {                                       // name-match lines: keep the value for the whole gap between two samples
+      const hold = Math.max(1, Math.ceil(1 / fpsUsed / DT)); let lastM = -1, lastC = 0, since = 999;
+      for (let j = 0; j < nG; j++) { if (mineA[j] >= 0) { lastM = mineA[j]; lastC = mineC[j]; since = 0; } else if (since < hold) { mineA[j] = lastM; mineC[j] = lastC; since++; } }
+      ch.mine = mineA; ch.mineN = mineC;
+    }
     return { nG, ch, onsets };
   }
 
@@ -740,7 +808,7 @@ const Engine = (function () {
 
     return {
       dt: DT, N: chData.nG, ch: chData.ch, onsets: chData.onsets, audioOk,
-      hasVisual: !!vis, partial, windowed: !!windows, recovery: rec, fps: opts.fps, regions: opts.regions || {}, profileId: opts.profile,
+      hasVisual: !!vis, partial, windowed: !!windows, hasTemplate: !!(opts.tpl && vis), recovery: rec, fps: opts.fps, regions: opts.regions || {}, profileId: opts.profile,
       loudSec, motionSec, seconds: (performance.now() - t0) / 1000, duration: v.duration
     };
   }

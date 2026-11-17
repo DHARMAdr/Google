@@ -66,9 +66,74 @@ const Hunter = (function () {
     return { n, strongest };
   }
 
+  /* ---------------------------------------------------------------
+     NAME MODE (used when the user taught the site their own name, see js/teach.js)
+     The engine looked for the taught picture of the user's name in the kill-feed area of every
+     frame (Engine: matchTemplate). Every time ONE MORE line with the user's name appears, that is
+     a kill/death of the user. Lines that show up at a view switch (scene cut right after) are
+     treated as the user's own DEATH and dropped (the camera jumps to a spectator view).
+     No gunfire or hit marker is needed (abilities, knives and wall-bangs also count); gunfire
+     only raises the confidence.
+     --------------------------------------------------------------- */
+  function detectByName(an, params) {
+    const { N, ch } = an, M = ch.mine, C = ch.mineN, onsets = (an.onsets || []).slice().sort((a, b) => a.t - b.t);
+    const stats = { candidates: 0, kills: 0, reasons: {}, mode: "name" };
+    const events = [];
+    const back = Math.round(1.6 / DT), ahead = Math.round(0.4 / DT);
+    for (let j = 1; j < N; j++) {
+      if (!(M[j] >= 0.55 && C[j] >= 1)) continue;
+      let prevMax = 0;
+      for (let k = Math.max(0, j - back); k < j; k++) if (C[k] > prevMax) prevMax = C[k];
+      if (C[j] <= prevMax) continue;                                         // not a NEW line
+      let stays = false;
+      for (let k = j; k <= Math.min(N - 1, j + ahead); k++) if (C[k] >= C[j]) stays = true;
+      if (!stays) continue;                                                  // flicker, not a real line
+      const t = j * DT;
+      stats.candidates++;
+      let death = false;
+      for (let k = Math.max(0, Math.round((t - 0.3) / DT)); k <= Math.min(N - 1, Math.round((t + 2.5) / DT)); k++) if (ch.cut[k] > 0) death = true;
+      const gun = an.audioOk ? shotsBefore(onsets, t + 0.2) : { n: 0, strongest: 0 };
+      if (death) { events.push({ t, conf: 0.2, kind: "feed", why: "rejected: the view switched right after (probably your own death)" }); stats.reasons["your own death (view switch)"] = (stats.reasons["your own death (view switch)"] || 0) + 1; continue; }
+      const conf = Math.min(1, 0.7 + Math.min(0.2, (M[j] - 0.55) * 0.5) + (gun.n >= 2 ? 0.1 : 0));
+      events.push({ t, conf, kind: "kill", why: "your name appeared in the kill feed (match " + M[j].toFixed(2) + (gun.n ? ", " + gun.n + " shot(s) before" : "") + ")" });
+    }
+    return finish(an, params, events, stats);
+  }
+
+  // Shared ending: drop doubles, group into streaks, build the picture line.
+  function finish(an, params, events, stats) {
+    const prof = PROFILES[params.profile] || PROFILES.shooter_tr, N = an.N;
+    events.sort((a, b) => a.t - b.t);
+    const kept = [];
+    for (const e of events) {
+      const last = kept[kept.length - 1];
+      if (last && e.t - last.t < 0.9) { if (e.kind === "kill" && (last.kind !== "kill" || e.conf > last.conf)) kept[kept.length - 1] = e; }
+      else kept.push(e);
+    }
+    const gap = params.gap || prof.gap || 7;
+    const scenes = []; let curS = null;
+    for (const e of kept) {
+      if (e.kind !== "kill") continue;
+      if (curS && e.t - curS.events[curS.events.length - 1].t <= gap) curS.events.push(e);
+      else { curS = { events: [e] }; scenes.push(curS); }
+    }
+    scenes.forEach((s) => {
+      s.kills = s.events.length; s.first = s.events[0].t; s.last = s.events[s.events.length - 1].t;
+      s.score = s.events.reduce((sum, e, idx) => sum + e.conf * (1 + 0.4 * idx), 0);
+      s.conf = Math.max(...s.events.map((e) => e.conf));
+      const n = s.kills;
+      s.label = n >= 5 ? "Multi-kill x" + n : n === 4 ? "Quad kill" : n === 3 ? "Triple kill" : n === 2 ? "Double kill" : "Kill";
+    });
+    const E = new Float32Array(N);
+    kept.forEach((e) => { if (e.kind === "kill") { const j = Math.min(N - 1, Math.round(e.t / DT)); for (let k = Math.max(0, j - 5); k <= Math.min(N - 1, j + 5); k++) E[k] = Math.max(E[k], e.conf); } });
+    stats.kills = scenes.reduce((n, s) => n + s.kills, 0);
+    return { events: kept, scenes, E, stats };
+  }
+
   /* detect(an, params) -> { events, scenes, E }
        params.sens : above 1 accepts weaker evidence (more kills), below 1 is stricter */
   function detect(an, params) {
+    if (an.hasTemplate && an.ch.mine) return detectByName(an, params);
     const sens = params.sens || 1;
     const prof = PROFILES[params.profile] || PROFILES.shooter_tr;
     const { N, ch } = an;

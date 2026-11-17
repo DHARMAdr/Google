@@ -342,7 +342,14 @@ const Exporter = (function () {
     const mod = await import(new URL("vendor/mp4-muxer/mp4-muxer.mjs", document.baseURI).href);
     const muxer = new mod.Muxer({ target: new mod.ArrayBufferTarget(), video: { codec: "avc", width: W, height: H }, fastStart: "in-memory", firstTimestampBehavior: "offset" });
     let encErr = null;
-    const enc = new VideoEncoder({ output: (chunk, meta) => { try { muxer.addVideoChunk(chunk, meta); } catch (e) { encErr = e; } }, error: (e) => { encErr = e; } });
+    // Some Android encoders hand back chunks whose duration is missing (null/NaN). The muxer refuses those (real error report
+    // CC-MWKJAE61), so when that happens we give the chunk a duration ourselves (one frame) and use the "raw" entry point.
+    const enc = new VideoEncoder({ output: (chunk, meta) => {
+      try {
+        if (Number.isFinite(chunk.duration) && chunk.duration >= 0) muxer.addVideoChunk(chunk, meta);
+        else { const data = new Uint8Array(chunk.byteLength); chunk.copyTo(data); muxer.addVideoChunkRaw(data, chunk.type, chunk.timestamp, Math.round(1e6 / (encFps || 30)), meta); }
+      } catch (e) { encErr = e; }
+    }, error: (e) => { encErr = e; } });
     enc.configure(cfg);
 
     // Sound is prepared at the same time (it runs in ffmpeg's own thread).
@@ -391,7 +398,7 @@ const Exporter = (function () {
               if (a > 0) { g.fillStyle = "rgba(0,0,0," + Math.min(1, a) + ")"; g.fillRect(0, 0, W, H); }
             }
             if (o.title && clip.label && (!(o.titleSecs > 0) || outT <= o.titleSecs)) drawTitleOn(g, clip.label, W, H);
-            const frame = new VideoFrame(cv, { timestamp: Math.round(outT * 1e6) });
+            const frame = new VideoFrame(cv, { timestamp: Math.round(outT * 1e6), duration: Math.round(1e6 / (encFps || 30)) });
             enc.encode(frame, { keyFrame: count % (encFps * 2) === 0 });
             frame.close(); count++; lastOut = outT;
             if (count % 8 === 0) { const f = Math.min(1, outT / outDur), el = (performance.now() - t0) / 1000; onProgress && onProgress(0.9 * f, f > 0.03 ? (el / f - el) : 0); }

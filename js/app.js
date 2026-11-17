@@ -446,7 +446,7 @@ function getRegions(profileId) {
 }
 function analysisKey(P) {
   if (P.method === "classic") return "classic";
-  return (P.method === "hunter" ? "hunter|" : "smart|") + P.fps + "|" + JSON.stringify(getRegions(P.profile));
+  return (P.method === "hunter" ? "hunter|" + (typeof Teach !== "undefined" && Teach.get() ? "name" + Teach.get().id + "|" : "") : "smart|") + P.fps + "|" + JSON.stringify(getRegions(P.profile));
 }
 
 function setAState(text, p, err) {
@@ -469,11 +469,12 @@ async function doAnalyse(v) {
 
   const prof = PROFILES[P.profile];
   const fps = classic ? 1 : P.fps;
-  const regions = classic ? {} : getRegions(P.profile);
+  const tpl = !classic && P.method === "hunter" && typeof Teach !== "undefined" ? Teach.get() : null;        // the taught picture of the user's name (or null)
+  const regions = classic ? {} : Object.assign({}, getRegions(P.profile), tpl ? { killfeed: Teach.region(tpl) } : {});
   aCtl = { cancel: false };
   setBusy(true); setAState("Starting...", 0.01); Compat.keepAwake(true);
   try {
-    v.an = await Engine.analyse(v, { fps, regions, hunt: P.method === "hunter", profile: classic ? "auto" : P.profile, height: fps >= 10 ? 144 : 108, regionWidth: fps >= 30 ? 320 : 240 },
+    v.an = await Engine.analyse(v, { fps, regions, hunt: P.method === "hunter", tpl, profile: classic ? "auto" : P.profile, height: fps >= 10 ? 144 : 108, regionWidth: tpl ? 480 : fps >= 30 ? 320 : 240 },
       aCtl, (f, text) => setAState(typeof text === "string" ? text : "Working...", f));
     v.anKey = key;
     const rec = v.an.recovery, failed = rec ? rec.attempts.filter((a) => !a.ok) : [];
@@ -506,14 +507,8 @@ function applySuggestions(v) {
   const P = readParams();
   let found;
   if (P.method === "smart" || P.method === "hunter") {
-    v.det = (P.method === "hunter" ? Hunter : Engine).detect(v.an, { profile: P.profile, sens: P.sens, gap: P.gap });
-    v.relaxed = 0;
-    // The Hunter is strict on purpose. If it finds nothing at all, retry with easier settings (and say so) instead of returning an empty result.
-    if (P.method === "hunter") for (const s of [Math.max(P.sens, 1) * 1.5, Math.max(P.sens, 1) * 2.3]) {
-      if (v.det.scenes.length) break;
-      const d2 = Hunter.detect(v.an, { profile: P.profile, sens: s, gap: P.gap });
-      if (d2.scenes.length) { v.det = d2; v.relaxed = s; }
-    }
+    v.det = (P.method === "hunter" ? Hunter : Engine).detect(v.an, { profile: P.profile, sens: P.method === "hunter" ? Math.max(1, P.sens) : P.sens, gap: P.gap });
+    v.relaxed = 0;      // (an automatic "easier settings" retry was removed: wrong clips are worse than none)
     const maxLen = PLATFORMS[P.platform].max;
     found = Engine.buildClips(v.an, v.det, { maxLen, minLen: Math.min(10, maxLen), fixedLen: P.length || 0, pre: P.pre, post: P.post, count: P.count, snap: P.snap > 0 });
   } else {
