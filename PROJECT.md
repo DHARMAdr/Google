@@ -227,3 +227,7 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 ### Round 9b - Cloud address check + Hunter diagnostics (2026-11-17)
 - User report CC-MWK3YRLA: Cloud URL pointed at their MangaFlow accounts Worker (not a ClipCutter server): test gave 404/405. A Worker cannot run ffmpeg. Fix: Test now asks /api/health first and says "NOT a ClipCutter server"; 404/405 errors carry the same hint.
 - User: Hunter still gave no kill clips on real footage (36 min, 768x480, Pixel). Now: if zero kills pass, it retries with easier settings (x1.5, x2.3) and says so; if still none, the status lists how many moments were checked and why each was rejected. Real footage still unverified; needs a kill-feed screenshot to tune.
+
+### Round 9c - Stream stall retry + tighter windows (2026-11-17)
+- Report CC-MWKAJBVK (Pixel 9a, 36 min): all 3 stream readers stalled together after ~2 min ("no pictures for 12 s"), analysis dropped to the slow seek reader; two-stage mode was not used (gunfire >75% of the video).
+- Fix: after a stall, unfinished parts are retried one at a time at half, then quarter speed before falling to seek. Gunfire windows now tighten progressively (strongest shots only, narrower) until <=55% of the video is watched. Retry path not reproducible here (needs a real phone); synthetic test unchanged (46 s of 120 s watched, 6/6 kills).

@@ -218,17 +218,20 @@ const Engine = (function () {
      WHY: reading pictures is the slow part (minutes), reading sound is fast (seconds).
      HOW TO IMPROVE: use a stricter shot test (only loud, close shots) to skip even more.   */
   function audioWindows(au, dur, before, after) {
-    const on = pickOnsets(au).filter((o) => o.s >= 1.0);
-    if (on.length < 3) return null;
-    const win = [];
-    for (const o of on) {
-      const a = Math.max(0, o.t - before), b = Math.min(dur, o.t + after);
-      const last = win[win.length - 1];
-      if (last && a <= last[1] + 0.5) last[1] = Math.max(last[1], b); else win.push([a, b]);
+    const all = pickOnsets(au);
+    if (all.length < 3) return null;
+    // Real games have gunfire almost everywhere. Keep only the strongest shots (and narrower windows) until at most ~55% of the video is watched.
+    for (const [minS, bef, aft] of [[1.0, before, after], [2.0, before, after], [3.0, before * 0.8, after * 0.8], [4.0, before * 0.65, after * 0.7], [5.0, before * 0.55, after * 0.6]]) {
+      const win = [];
+      for (const o of all) {
+        if (o.s < minS) continue;
+        const a = Math.max(0, o.t - bef), b = Math.min(dur, o.t + aft), last = win[win.length - 1];
+        if (last && a <= last[1] + 0.5) last[1] = Math.max(last[1], b); else win.push([a, b]);
+      }
+      const covered = win.reduce((s, w) => s + (w[1] - w[0]), 0);
+      if (win.length && covered <= dur * 0.55) return win;
     }
-    const covered = win.reduce((s, w) => s + (w[1] - w[0]), 0);
-    if (covered > dur * 0.75) return null;                  // gunfire everywhere: nothing to skip
-    return win;
+    return null;                                              // even the strongest shots cover too much: watch everything
   }
 
   /* ===============================================================
@@ -570,6 +573,25 @@ const Engine = (function () {
           }
         }
       })()));
+      // The readers worked, then stalled (a phone can run out of video decoders when 3 play at once).
+      // Before giving up on the fast reader, retry the unfinished parts ONE AT A TIME at a gentler speed.
+      if (segs.some((g) => g.cur > g.a) && segs.some((g) => g.cur < g.b)) {
+        for (const slow of [rate * 0.5, Math.max(1, rate * 0.25)]) {
+          const pending = segs.filter((g) => g.cur < g.b);
+          if (!pending.length) break;
+          progress && progress(doneCount() / need, 0, "Fast reader stalled - retrying slower, one part at a time...");
+          await new Promise((r) => setTimeout(r, 1500));
+          for (const seg of pending) {
+            const before = seg.cur;
+            try { await runSeg(seg, makeVideoSource(v, geom, "stream", async () => ({ url: v.url }), "stream", { rate: Math.max(1, slow), fps, ctl }), "stream-retry"); }
+            catch (e) {
+              if (e && e.message === CANCEL) throw e;
+              rec.attempts.push({ step: "frames", strategy: "stream retry at " + slow.toFixed(1) + "x", ok: false, error: errText(e), note: "moved from sample " + before + " to " + seg.cur });
+              if (seg.cur === before) break;                 // no progress at all: try an even gentler speed
+            }
+          }
+        }
+      }
       if (segs.every((g) => g.cur >= g.b)) {
         rec.frameSource = "stream x" + N;
         rec.attempts.push({ step: "frames", strategy: "stream x" + N + " (fast playback, " + N + " parts at once)", ok: true, ms: Math.round(performance.now() - s0) });
