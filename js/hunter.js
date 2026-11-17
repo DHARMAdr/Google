@@ -90,6 +90,7 @@ const Hunter = (function () {
       if (isMax) cand.push(j);
     }
 
+    const stats = { candidates: cand.length, kills: 0, reasons: {} };
     // ---- 2) JUDGE every candidate ----
     for (const j of cand) {
       const t = j * DT;
@@ -119,6 +120,7 @@ const Hunter = (function () {
         events.push({ t, conf, kind: "kill", why: "your kill: " + names.join(" + ") + (an.audioOk ? " + " + gun.n + " shot(s) before" : "") });
       } else if (conf > 0.15) {
         events.push({ t, conf: conf * 0.5, kind: "feed", why: "rejected: " + reason });
+        stats.reasons[reason] = (stats.reasons[reason] || 0) + 1;
       }
     }
 
@@ -151,7 +153,8 @@ const Hunter = (function () {
     // A simple line for the timeline picture: height = how sure we are around each kill.
     const E = new Float32Array(N);
     kept.forEach((e) => { if (e.kind === "kill") { const j = Math.min(N - 1, Math.round(e.t / DT)); for (let k = Math.max(0, j - 5); k <= Math.min(N - 1, j + 5); k++) E[k] = Math.max(E[k], e.conf); } });
-    return { events: kept, scenes, E };
+    stats.kills = scenes.reduce((n, s) => n + s.kills, 0);
+    return { events: kept, scenes, E, stats };
   }
 
   return { detect };

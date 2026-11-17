@@ -505,6 +505,13 @@ function applySuggestions(v) {
   let found;
   if (P.method === "smart" || P.method === "hunter") {
     v.det = (P.method === "hunter" ? Hunter : Engine).detect(v.an, { profile: P.profile, sens: P.sens, gap: P.gap });
+    v.relaxed = 0;
+    // The Hunter is strict on purpose. If it finds nothing at all, retry with easier settings (and say so) instead of returning an empty result.
+    if (P.method === "hunter") for (const s of [Math.max(P.sens, 1) * 1.5, Math.max(P.sens, 1) * 2.3]) {
+      if (v.det.scenes.length) break;
+      const d2 = Hunter.detect(v.an, { profile: P.profile, sens: s, gap: P.gap });
+      if (d2.scenes.length) { v.det = d2; v.relaxed = s; }
+    }
     const maxLen = PLATFORMS[P.platform].max;
     found = Engine.buildClips(v.an, v.det, { maxLen, minLen: Math.min(10, maxLen), fixedLen: P.length || 0, pre: P.pre, post: P.post, count: P.count, snap: P.snap > 0 });
   } else {
@@ -535,7 +542,8 @@ $("analyseBtn").addEventListener("click", async () => {
   if (!(await doAnalyse(v))) return;
   applySuggestions(v);
   const n = v.clips.filter((c) => c.auto).length;
-  setAState(n ? "Found " + n + " clip(s). Scroll down to check them." : "No clear highlights found. Try a different video type, higher sensitivity or Deep detail.", 1);
+  const st = v.det && v.det.stats, why = st ? " Moments checked: " + st.candidates + (Object.keys(st.reasons).length ? " - rejected: " + Object.entries(st.reasons).map(([k, c]) => c + "x " + k).join("; ") : "") + "." : "";
+  setAState(n ? "Found " + n + " clip(s). Scroll down to check them." + (v.relaxed ? " (Nothing passed the strict test, so easier settings were used - please check each clip.)" : "") : "No kill of the main player was recognised." + why + " Try Sensitivity 1.5-2, Deep detail (10 fps), or check the kill-feed box with Calibrate.", 1);
   if (n) { toast("Found " + n + " highlight clip(s)."); $("sec-clips").scrollIntoView({ behavior: "smooth" }); }
 });
 $("cancelAnalyseBtn").addEventListener("click", () => { aCtl.cancel = true; });

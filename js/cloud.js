@@ -61,7 +61,7 @@ const Cloud = (function () {
         active = base;
         if (o.raw) return res;
         let data = null; try { data = await res.json(); } catch (e) { /* not json */ }
-        if (!res.ok) throw new CloudError((data && data.error) || ("server answered " + res.status), res.status);
+        if (!res.ok) throw new CloudError((data && data.error) || ("server answered " + res.status + ([404, 405].includes(res.status) ? " - this address is NOT a ClipCutter server (it is some other app or Worker). A Cloudflare Worker cannot run ffmpeg; see the Cloud help." : "")), res.status);
         return data;
       } catch (e) {
         if (e instanceof CloudError && e.status !== 0) throw e;                 // a real answer from the server: do not try the other one
@@ -77,6 +77,12 @@ const Cloud = (function () {
     for (const base of bases()) {
       const t0 = performance.now();
       try {
+        // First ask who is there. Only a real ClipCutter server answers /api/health with app "clipcutter-server".
+        try {
+          const h = await timed(base + "/api/health", {}, 12000);
+          let hj = null; try { hj = await h.json(); } catch (e) { /* not json */ }
+          if (!hj || hj.app !== "clipcutter-server") { out.results.push({ base, ok: false, error: "this address is NOT a ClipCutter server (answered " + h.status + "). It is another app/Worker. Put the address of the ClipCutter server here (see README: server)." }); continue; }
+        } catch (e) { /* unreachable: the normal request below reports it */ }
         const res = await timed(base + "/api/info", { headers: { Authorization: "Bearer " + cfg.token } }, 12000);
         const ms = Math.round(performance.now() - t0);
         if (res.status === 401) out.results.push({ base, ok: false, ms, error: "the address works but the token is wrong" });
