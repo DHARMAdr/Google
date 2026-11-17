@@ -65,8 +65,11 @@ function readParams() {
   let length = lenVal === "custom" ? clamp(parseFloat($("customLen").value) || 30, 3, 3600) : parseInt(lenVal, 10);
   const method = $("methodSel").value;
   if (method === "classic" && !length) length = 30;
+  // The Hunter needs a game profile with screen boxes (kill feed, banner, hit marker). "Any video" has none, so use the common top-right layout.
+  let profile = $("profileSel").value;
+  if (method === "hunter" && !(PROFILES[profile] && PROFILES[profile].feed)) profile = "shooter_tr";
   return {
-    method, profile: $("profileSel").value, fps: parseFloat($("depthSel").value),
+    method, profile, fps: parseFloat($("depthSel").value),
     platform: $("platformSel").value, length,
     count: clamp(parseInt($("countSel").value, 10) || 6, 1, 20),
     pre: clamp(parseFloat($("preSel").value) || 0, 0, 30), post: clamp(parseFloat($("postSel").value) || 0, 0, 30),
@@ -441,7 +444,7 @@ function getRegions(profileId) {
 }
 function analysisKey(P) {
   if (P.method === "classic") return "classic";
-  return "smart|" + P.fps + "|" + JSON.stringify(getRegions(P.profile));
+  return (P.method === "hunter" ? "hunter|" : "smart|") + P.fps + "|" + JSON.stringify(getRegions(P.profile));
 }
 
 function setAState(text, p, err) {
@@ -468,7 +471,7 @@ async function doAnalyse(v) {
   aCtl = { cancel: false };
   setBusy(true); setAState("Starting...", 0.01); Compat.keepAwake(true);
   try {
-    v.an = await Engine.analyse(v, { fps, regions, profile: classic ? "auto" : P.profile, height: fps >= 10 ? 144 : 108, regionWidth: fps >= 30 ? 320 : 240 },
+    v.an = await Engine.analyse(v, { fps, regions, hunt: P.method === "hunter", profile: classic ? "auto" : P.profile, height: fps >= 10 ? 144 : 108, regionWidth: fps >= 30 ? 320 : 240 },
       aCtl, (f, text) => setAState(typeof text === "string" ? text : "Working...", f));
     v.anKey = key;
     const rec = v.an.recovery, failed = rec ? rec.attempts.filter((a) => !a.ok) : [];
@@ -500,8 +503,8 @@ function applySuggestions(v) {
   if (!v || !v.an) return;
   const P = readParams();
   let found;
-  if (P.method === "smart") {
-    v.det = Engine.detect(v.an, { profile: P.profile, sens: P.sens, gap: P.gap });
+  if (P.method === "smart" || P.method === "hunter") {
+    v.det = (P.method === "hunter" ? Hunter : Engine).detect(v.an, { profile: P.profile, sens: P.sens, gap: P.gap });
     const maxLen = PLATFORMS[P.platform].max;
     found = Engine.buildClips(v.an, v.det, { maxLen, minLen: Math.min(10, maxLen), fixedLen: P.length || 0, pre: P.pre, post: P.post, count: P.count, snap: P.snap > 0 });
   } else {

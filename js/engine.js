@@ -210,6 +210,27 @@ const Engine = (function () {
     return out;
   }
 
+  /* ---------------------------------------------------------------
+     TWO-STAGE SPEED-UP: from the sound alone, find the short stretches that contain gunfire.
+     A kill cannot happen without a shot, so the picture only has to be watched around those
+     stretches. Returns [[from, to], ...] in seconds, or null when the whole video must be watched
+     (little to save, or the sound is useless).
+     WHY: reading pictures is the slow part (minutes), reading sound is fast (seconds).
+     HOW TO IMPROVE: use a stricter shot test (only loud, close shots) to skip even more.   */
+  function audioWindows(au, dur, before, after) {
+    const on = pickOnsets(au).filter((o) => o.s >= 1.0);
+    if (on.length < 3) return null;
+    const win = [];
+    for (const o of on) {
+      const a = Math.max(0, o.t - before), b = Math.min(dur, o.t + after);
+      const last = win[win.length - 1];
+      if (last && a <= last[1] + 0.5) last[1] = Math.max(last[1], b); else win.push([a, b]);
+    }
+    const covered = win.reduce((s, w) => s + (w[1] - w[0]), 0);
+    if (covered > dur * 0.75) return null;                  // gunfire everywhere: nothing to skip
+    return win;
+  }
+
   /* ===============================================================
      STAGE 2: VISUAL SCAN (frame by frame)
      =============================================================== */
@@ -440,7 +461,7 @@ const Engine = (function () {
         L.edge = ed; L.white = wh; L.init = true;
         if (write) out.pulse[name][i] = hugeChange ? 0 : rise;
       }
-      if (write) { out.t[i] = t; out.motion[i] = motion; out.flash[i] = flashFrac; out.red[i] = redRise; out.cut[i] = cut; }
+      if (write) { out.mask[i] = 1; out.t[i] = t; out.motion[i] = motion; out.flash[i] = flashFrac; out.red[i] = redRise; out.cut[i] = cut; }
       const tmp = prevY; prevY = curY; curY = tmp; prevHist = hist; havePrev = true;
     };
   }
@@ -477,7 +498,7 @@ const Engine = (function () {
     });
     const regNames = Object.keys(regs), geom = { W, H, regs };
     const out = { t: new Float32Array(total), motion: new Float32Array(total), flash: new Float32Array(total),
-                  red: new Float32Array(total), cut: new Uint8Array(total), pulse: {} };
+                  red: new Float32Array(total), cut: new Uint8Array(total), mask: new Uint8Array(total), pulse: {} };
     regNames.forEach((k) => (out.pulse[k] = new Float32Array(total)));
     v.deadSources = v.deadSources || {};
     const t0 = performance.now();
@@ -487,15 +508,25 @@ const Engine = (function () {
     const N = v.noPlay || v.deadSources.stream ? 0 : deviceWorkers(total);
     const segs = [];                                   // { a, b, cur }  (cur = next sample to do)
     const parts = Math.max(1, N);
-    for (let k = 0; k < parts; k++) segs.push({ a: Math.floor((total * k) / parts), b: Math.floor((total * (k + 1)) / parts), cur: Math.floor((total * k) / parts), err: null });
+    if (opts.windows && opts.windows.length) {
+      // TWO-STAGE MODE: only the short windows around gunfire are watched. Everything else is skipped (much faster).
+      for (const w of opts.windows) {
+        const a = clamp(Math.floor(w[0] * fps), 0, total - 1), b = clamp(Math.ceil(w[1] * fps), a + 1, total);
+        segs.push({ a, b, cur: a, err: null });
+      }
+      rec.windowed = segs.length;
+    } else {
+      for (let k = 0; k < parts; k++) segs.push({ a: Math.floor((total * k) / parts), b: Math.floor((total * (k + 1)) / parts), cur: Math.floor((total * k) / parts), err: null });
+    }
     rec.workers = N;
+    const need = Math.max(1, segs.reduce((s, g) => s + (g.b - g.a), 0));      // how many samples we really have to read
     const doneCount = () => segs.reduce((s, g) => s + (g.cur - g.a), 0);
     let lastTick = 0;
     const report = async (force) => {
       const now = performance.now();
       if (!force && now - lastTick < 250) return;
       lastTick = now;
-      const done = doneCount() / total, el = (now - t0) / 1000;
+      const done = doneCount() / need, el = (now - t0) / 1000;
       progress && progress(done, done > 0.01 ? el / done - el : 0);
       await tick();
     };
@@ -524,13 +555,21 @@ const Engine = (function () {
     if (N > 0) {
       const rate = clamp(0.4 * 60 * step, 1, 8);       // about 0.4 samples per screen refresh (at most 8x) so no sample is skipped
       const s0 = performance.now();
-      await Promise.all(segs.map((seg, k) =>
-        runSeg(seg, makeVideoSource(v, geom, "stream", async () => ({ url: v.url }), "stream", { rate, fps, ctl }), "stream#" + k).catch((e) => {
-          if (e && e.message === CANCEL) throw e;
-          seg.err = e;
-          rec.attempts.push({ step: "frames", strategy: "stream#" + k + " (fast playback)", ok: false, error: errText(e), ms: Math.round(performance.now() - s0), note: "stopped at sample " + seg.cur + " of " + seg.b });
-          console.warn("Stream reader " + k + " failed:", e);
-        })));
+      const queue = segs.slice();
+      await Promise.all(Array.from({ length: N }, (_, k) => (async () => {
+        while (queue.length) {
+          const seg = queue.shift();
+          try {
+            await runSeg(seg, makeVideoSource(v, geom, "stream", async () => ({ url: v.url }), "stream", { rate, fps, ctl }), "stream#" + k);
+          } catch (e) {
+            if (e && e.message === CANCEL) throw e;
+            seg.err = e;
+            rec.attempts.push({ step: "frames", strategy: "stream#" + k + " (fast playback)", ok: false, error: errText(e), ms: Math.round(performance.now() - s0), note: "stopped at sample " + seg.cur + " of " + seg.b });
+            console.warn("Stream reader " + k + " failed:", e);
+            if (seg.cur === seg.a && !segs.some((g) => g.cur > g.a)) { queue.length = 0; break; }   // never worked at all: stop trying, the chain below takes over
+          }
+        }
+      })()));
       if (segs.every((g) => g.cur >= g.b)) {
         rec.frameSource = "stream x" + N;
         rec.attempts.push({ step: "frames", strategy: "stream x" + N + " (fast playback, " + N + " parts at once)", ok: true, ms: Math.round(performance.now() - s0) });
@@ -544,7 +583,7 @@ const Engine = (function () {
     const chainDef = [
       { name: "seek", make: () => makeVideoSource(v, geom, "seek", async () => ({ url: v.url }), "seek", { ctl }) },
       { name: "memory", make: () => makeVideoSource(v, geom, "memory", () => memoryURL(v), "seek", { ctl }) },
-      { name: "ffmpeg", make: () => makeFFmpegSource(v, geom, fps, (t) => progress && progress(doneCount() / total, 0, t)) }
+      { name: "ffmpeg", make: () => makeFFmpegSource(v, geom, fps, (t) => progress && progress(doneCount() / need, 0, t)) }
     ];
     let lastErr = null;
     for (const seg of segs) {
@@ -556,7 +595,7 @@ const Engine = (function () {
           throw err;
         }
         const s0 = performance.now(), from = seg.cur;
-        progress && progress(doneCount() / total, 0, cand.name === "seek" ? undefined : "Switching to the " + cand.name + " reader...");
+        progress && progress(doneCount() / need, 0, cand.name === "seek" ? undefined : "Switching to the " + cand.name + " reader...");
         try {
           await runSeg(seg, cand.make(), cand.name);
           rec.attempts.push({ step: "frames", strategy: cand.name, ok: true, ms: Math.round(performance.now() - s0), note: "samples " + from + "-" + seg.b });
@@ -584,6 +623,7 @@ const Engine = (function () {
 
     if (vis) {
       for (let i = 0; i < vis.t.length; i++) {
+        if (vis.mask && !vis.mask[i]) continue;          // two-stage mode: this sample was skipped on purpose
         const j = Math.min(nG - 1, Math.floor(vis.t[i] / DT));
         raw.motion[j] = Math.max(raw.motion[j], vis.motion[i]);
         raw.flash[j] = Math.max(raw.flash[j], vis.flash[i]);
@@ -647,9 +687,14 @@ const Engine = (function () {
       }
     }
 
+    let windows = null;
+    if (opts.hunt && au && opts.useVisual !== false && v.duration > 90) {
+      windows = audioWindows(au, v.duration, 3.2, 2.4);
+      if (windows) rec.notes.push("Two-stage mode: only " + Math.round(windows.reduce((s, w) => s + w[1] - w[0], 0)) + " s of " + Math.round(v.duration) + " s around gunfire was watched.");
+    }
     if (opts.useVisual !== false) {
       try {
-        vis = await visualScan(v, opts, ctl, (f, eta, text) =>
+        vis = await visualScan(v, windows ? Object.assign({}, opts, { windows }) : opts, ctl, (f, eta, text) =>
           progress && progress(0.25 + 0.7 * f, text || ("Watching frames... " + Math.round(f * 100) + "%" + (eta > 1 ? "  (about " + fmt(eta) + " left)" : ""))), rec);
       } catch (e) {
         if (e.message === CANCEL) throw e;
@@ -673,7 +718,7 @@ const Engine = (function () {
 
     return {
       dt: DT, N: chData.nG, ch: chData.ch, onsets: chData.onsets, audioOk,
-      hasVisual: !!vis, partial, recovery: rec, fps: opts.fps, regions: opts.regions || {}, profileId: opts.profile,
+      hasVisual: !!vis, partial, windowed: !!windows, recovery: rec, fps: opts.fps, regions: opts.regions || {}, profileId: opts.profile,
       loudSec, motionSec, seconds: (performance.now() - t0) / 1000, duration: v.duration
     };
   }

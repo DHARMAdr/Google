@@ -40,6 +40,7 @@
     <a href="#sec-analyse">Auto highlights</a>
     <a href="#sec-clips">Clips</a>
     <a href="#sec-export">Export</a>
+    <a href="montage.html" title="Join finished clips into one video">Montage</a>
   </nav>
   <div class="tools">
     <button class="ghost small" id="installBtn" hidden>Install app</button>
@@ -120,7 +121,8 @@
       <div>
         <label for="methodSel">Method</label>
         <select id="methodSel" data-persist="1">
-          <option value="smart" selected>Smart Highlight Engine (kills, streaks, big plays)</option>
+          <option value="hunter" selected>Main-player kills only (new - only YOUR kills, no filler clips)</option>
+          <option value="smart">Smart Highlight Engine (kills, streaks, big plays)</option>
           <option value="classic">Classic (loudest + most action)</option>
         </select>
       </div>
@@ -431,6 +433,7 @@
 <script src="js/cloud.js"></script>
 <script src="js/profiles.js"></script>
 <script src="js/engine.js"></script>
+  <script src="js/hunter.js"></script>
 <script src="js/exporter.js"></script>
 <script src="js/app.js"></script>
 </body>

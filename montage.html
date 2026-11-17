@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<!-- =====================================================================
+  montage.html - a SEPARATE little program: join finished clips into ONE video.
+  WHY IT IS SEPARATE: so it can never break the main ClipCutter page. It only READS the
+  finished clips the main page saved in this browser (or files you pick) and never writes to them.
+  HOW TO IMPROVE: add cross-fades, music, per-clip titles, drag-and-drop ordering.
+====================================================================== -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClipCutter Montage</title>
+<link rel="icon" href="icon.svg">
+<link rel="stylesheet" href="css/style.css">
+<style>
+  main.mt { max-width: 900px; margin: 0 auto; padding: 16px; }
+  .mclip { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; margin: 12px 0; }
+  .mclip video { width: 100%; max-height: 300px; background: #000; border-radius: 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  .row label { min-width: 52px; color: var(--muted); }
+  .row input[type=range] { flex: 1; min-width: 140px; }
+  .row input[type=number] { width: 90px; }
+  .tot { color: var(--muted); margin: 8px 0; }
+  #mStatus { margin: 10px 0; }
+</style>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="index.html"><span class="logo">&#9986;</span> Clip<b>Cutter</b> Montage</a>
+  <div class="tools"><a class="ghost small" href="index.html" style="text-decoration:none">&larr; Back to ClipCutter</a></div>
+</header>
+<main class="mt">
+  <h2>Join clips into one video</h2>
+  <p class="tot">1) Add your finished clips. 2) Trim each one if you like. 3) Put them in order. 4) Export one video.</p>
+  <div class="row">
+    <button id="loadSaved">Add finished clips from ClipCutter</button>
+    <button class="ghost" id="pickBtn">Add video files from this device</button>
+    <input id="pick" type="file" accept="video/*" multiple hidden>
+  </div>
+  <div id="list"></div>
+  <div class="tot" id="total">No clips yet.</div>
+
+  <h3>Output</h3>
+  <div class="row">
+    <label>Shape</label>
+    <select id="shape"><option value="v">Vertical 9:16 (1080x1920)</option><option value="h">Horizontal 16:9 (1920x1080)</option><option value="s">Square 1:1 (1080x1080)</option></select>
+    <select id="fit"><option value="blur">Fit + blurred background</option><option value="fit">Fit + black bars</option><option value="fill">Fill (crop)</option></select>
+  </div>
+  <div class="row">
+    <label>Quality</label>
+    <select id="qual"><option value="0.2">Maximum</option><option value="0.14" selected>High</option><option value="0.09">Quick (smaller file)</option></select>
+    <label>Dip to black</label>
+    <select id="fade"><option value="0">None (hard cut)</option><option value="0.25" selected>Short (0.25 s)</option><option value="0.5">Long (0.5 s)</option></select>
+  </div>
+  <div class="row"><button id="go" disabled>Export one video</button><button class="ghost" id="stop" hidden>Cancel</button></div>
+  <div class="status" id="mStatus"></div>
+  <div class="bar"><div id="mBar" style="width:0%"></div></div>
+  <div id="result"></div>
+</main>
+<script src="js/util.js"></script>
+<script src="js/persist.js"></script>
+<script src="js/exporter.js"></script>
+<script src="js/montage.js"></script>
+</body>
+</html>
