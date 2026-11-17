@@ -67,7 +67,8 @@ function readParams() {
   if (method === "classic" && !length) length = 30;
   // The Hunter needs a game profile with screen boxes (kill feed, banner, hit marker). "Any video" has none, so use the common top-right layout.
   let profile = $("profileSel").value;
-  if (method === "hunter" && !(PROFILES[profile] && PROFILES[profile].feed)) profile = "shooter_tr";
+  // Unknown layout (no feed box, or the built-in top-right/top-left guesses that were never calibrated): watch the whole top strip.
+  if (method === "hunter" && (!(PROFILES[profile] && PROFILES[profile].feed) || (["shooter_tr", "shooter_tl"].includes(profile) && !store.get("regions." + profile, null)))) profile = "shooter_top";
   return {
     method, profile, fps: parseFloat($("depthSel").value),
     platform: $("platformSel").value, length,
@@ -128,11 +129,12 @@ drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove
 // Some phones give an empty type for .mov, so we also check the file name.
 const looksLikeVideo = (f) => f.type.startsWith("video/") || /\.(mp4|mov|m4v|webm|mkv|avi|3gp)$/i.test(f.name);
 
-async function addFiles(files) {
+async function addFiles(files, opts) {
   for (const file of files) {
     if (!looksLikeVideo(file)) { setStatus("Skipped " + file.name + " (not a video file).", undefined, true); continue; }
     const v = {
       id: videoSeq++, file, name: file.name, url: "", duration: 0, w: 0, h: 0, thumb: "",
+      remote: opts && opts.remote ? { id: opts.remote, complete: true, pending: [], options: null } : null,
       an: null, anKey: "", det: null, clips: [], inT: 0, outT: 0, deleted: false, noPlay: false, previewUrl: "", codec: "", copyHow: "", cleanup: null
     };
     // STEP 1: make a stable private copy right now, while the phone still allows reading the picked file.
@@ -538,12 +540,12 @@ function sortClips() {
 // The main button.
 $("analyseBtn").addEventListener("click", async () => {
   if (!cur || analysing) return;
-  const v = cur;
+  const v = cur, P = readParams();
   if (!(await doAnalyse(v))) return;
   applySuggestions(v);
   const n = v.clips.filter((c) => c.auto).length;
   const st = v.det && v.det.stats, why = st ? " Moments checked: " + st.candidates + (Object.keys(st.reasons).length ? " - rejected: " + Object.entries(st.reasons).map(([k, c]) => c + "x " + k).join("; ") : "") + "." : "";
-  setAState(n ? "Found " + n + " clip(s). Scroll down to check them." + (v.relaxed ? " (Nothing passed the strict test, so easier settings were used - please check each clip.)" : "") : "No kill of the main player was recognised." + why + " Try Sensitivity 1.5-2, Deep detail (10 fps), or check the kill-feed box with Calibrate.", 1);
+  setAState(n ? "Found " + n + " clip(s) around kills (" + (P.method === "hunter" ? "Main-player kills only" : P.method) + "). Scroll down to check them." + (v.relaxed ? " (Nothing passed the strict test, so easier settings were used - please check each clip.)" : "") : "No kill of the main player was recognised (method: " + (P.method === "hunter" ? "Main-player kills only" : P.method) + ")." + why + " Try Sensitivity 1.5-2, Deep detail (10 fps), or check the kill-feed box with Calibrate.", 1);
   if (n) { toast("Found " + n + " highlight clip(s)."); $("sec-clips").scrollIntoView({ behavior: "smooth" }); }
 });
 $("cancelAnalyseBtn").addEventListener("click", () => { aCtl.cancel = true; });
@@ -886,6 +888,7 @@ async function exportClip(v, clip, worker, quiet) {
         progress: (f, eta) => { if (barEl) barEl.style.width = Math.round(f * 100) + "%"; if (!quiet) $("eBar").style.width = Math.round(f * 100) + "%"; if (eta > 2 && !quiet) setEStatus((clip.status || "").split("  (")[0] + "  (about " + fmt(eta) + " left)"); }
       });
       clip.out = { url: URL.createObjectURL(r.blob), name: clipFileName(v, clip, r.ext), size: r.blob.size, ext: r.ext, saved: "" };
+      if (Cloud.profile().loggedIn) Cloud.putClip(v, clip, r.blob);          // keep a copy of the finished Short on the profile's server (best effort)
       if (r.info) console.log("Turbo export finished:", JSON.stringify(r.info));
       if (v.copyName) { const sn = v.copyName + "_c" + clip.id + "." + r.ext; Persist.saveExport(sn, r.blob).then(() => { if (clip.out) clip.out.saved = sn; }).catch((e) => console.warn("Could not keep the export for later:", errText(e))); }
       if (barEl) barEl.style.width = "100%";
@@ -1246,7 +1249,7 @@ async function restoreLibrary() {
     const n = Cloud.pendingDeletes().length; msg(n ? n + " server delete(s) are waiting to be retried automatically." : "");
     dlg.showModal();
   });
-  const read = () => ({ url: $("cloudUrl").value.trim(), backup: $("cloudBackup").value.trim(), token: $("cloudToken").value.trim(), auto: $("cloudAuto").checked });
+  const read = () => ({ url: $("cloudUrl").value.trim(), backup: $("cloudBackup").value.trim(), token: $("cloudToken").value.trim(), auto: $("cloudAuto").checked, ...($("cloudToken").value.trim() !== Cloud.getConfig().token ? { user: "", role: "" } : {}) });   // typing a different token = leaving the profile login
   $("cloudSave").addEventListener("click", () => { Cloud.setConfig(read()); refreshCloudUI(); msg(Cloud.enabled() ? "Saved. Press 'Test connection' to check it." : "Saved. The cloud server is OFF (address or token missing)."); Cloud.flushDeletes(); });
   $("cloudTest").addEventListener("click", async () => {
     Cloud.setConfig(read()); refreshCloudUI();

@@ -889,7 +889,7 @@ const Engine = (function () {
     // 2b) stretch short windows to the wanted length, trim long ones to the best-scoring part
     merged.forEach((w) => {
       const want = fixed || minLen;
-      if (w.end - w.start < want) { const extra = want - (w.end - w.start); w.start -= extra * 0.6; w.end += extra * 0.4; }
+      if (w.end - w.start < want) { const extra = want - (w.end - w.start); w.start -= extra * 0.25; w.end += extra * 0.75; }   // stretch mostly AFTER the kill: never pull in the waiting time before it
       if (w.end - w.start > cap) {
         const evs = w.scenes.flatMap((s) => s.events);
         let bestS = w.start, bestV = -1;

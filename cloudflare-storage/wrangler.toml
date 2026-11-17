@@ -11,7 +11,8 @@ bucket_name = "clipcutter-storage"
 # Settings (not secret). The TOKEN is a secret: wrangler secret put TOKEN
 [vars]
 ALLOWED_ORIGINS = "https://dharmadr.github.io"
-TTL_HOURS = "48"      # videos are removed this many hours after last use
+TTL_HOURS = "0"       # 0 = keep videos until deleted. Or a number of hours to auto-delete unused videos
+OPEN_SIGNUP = "true"  # "false" = only the admin can create profiles (anyone can still be created with the owner key)
 MAX_GB = "8"          # total storage limit
 
 # Clean-up every hour

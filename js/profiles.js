@@ -57,6 +57,20 @@ const PROFILES = {
     w: { killfeed: 1, banner: 0.7, hit: 0.5, burst: 0.9, boom: 0.5, loud: 0.4, motion: 0.3, flash: 0.3, red: 0.2 },
     gap: 7, pre: 5, post: 3.5
   },
+  // Used by the Main-player Hunter when the game's layout is unknown: the kill feed is searched along the WHOLE top
+  // of the screen (works for top-left, top-centre and top-right layouts). Static HUD pieces (map, counters) do not matter,
+  // because the engine only reacts to NEW text appearing.
+  shooter_top: {
+    name: "Shooter - kill feed anywhere along the top (Free Fire, BGMI, PUBG, CoD Mobile...)",
+    feed: true,
+    regions: {
+      killfeed: { x: 0.03, y: 0.02, w: 0.94, h: 0.30 },
+      banner:   { x: 0.20, y: 0.50, w: 0.60, h: 0.35 },
+      hit:      { x: 0.40, y: 0.35, w: 0.20, h: 0.30 }
+    },
+    w: { killfeed: 1, banner: 0.7, hit: 0.5, burst: 0.9, boom: 0.5, loud: 0.4, motion: 0.3, flash: 0.3, red: 0.2 },
+    gap: 7, pre: 5, post: 3.5
+  },
   shooter_bl: {
     name: "Shooter - kill feed bottom-left",
     feed: true,

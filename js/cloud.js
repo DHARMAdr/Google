@@ -29,7 +29,7 @@
 const Cloud = (function () {
   "use strict";
   const KEY = "cloud", DEL_KEY = "cloudDeletes";
-  let cfg = Object.assign({ url: "", backup: "", token: "", auto: false }, store.get(KEY, {}));
+  let cfg = Object.assign({ url: "", backup: "", token: "", auto: false, user: "", role: "" }, store.get(KEY, {}));
   let active = "";                                           // the address that answered fastest last time
 
   const norm = (u) => String(u || "").trim().replace(/\/+$/, "");
@@ -61,6 +61,7 @@ const Cloud = (function () {
         active = base;
         if (o.raw) return res;
         let data = null; try { data = await res.json(); } catch (e) { /* not json */ }
+        if (res.status === 401 && cfg.user) { setConfig({ token: "" }); window.dispatchEvent(new Event("cc-session-expired")); }   // the login ran out: ask for the code again
         if (!res.ok) throw new CloudError((data && data.error) || ("server answered " + res.status + ([404, 405].includes(res.status) ? " - this address is NOT a ClipCutter server (it is some other app or Worker). A Cloudflare Worker cannot run ffmpeg; see the Cloud help." : "")), res.status);
         return data;
       } catch (e) {
@@ -193,6 +194,52 @@ const Cloud = (function () {
   }
   async function purge() { return call("POST", "/api/purge"); }
 
+  /* ---------- PROFILES (username + 6-digit code; needs the Cloudflare storage server in /cloudflare-storage) ---------- */
+  // Sign up / log in. No token is needed for these two calls, so they do not use call().
+  async function sign(kind, url, username, pin, ownerKey, backup) {
+    const base = norm(url);
+    if (!/^https?:\/\//.test(base)) throw new CloudError("Type the server address first (it starts with https://).", 0);
+    let res;
+    try { res = await timed(base + "/api/" + kind, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, pin, ownerKey: ownerKey || undefined }) }, 20000); }
+    catch (e) { throw new CloudError("Could not reach the server: " + errText(e), 0); }
+    let data = null; try { data = await res.json(); } catch (e) { /* not json */ }
+    if (!res.ok || !data || !data.token) throw new CloudError((data && data.error) || ("server answered " + res.status + ([404, 405].includes(res.status) ? " - this address is not the ClipCutter storage server" : "")), res.status);
+    setConfig({ url: base, backup: norm(backup), token: data.token, auto: true, user: data.user, role: data.role });
+    store.set("cloudCanRender", false);
+    return data;
+  }
+  const login = (url, u, pin, backup) => sign("login", url, u, pin, "", backup);
+  const register = (url, u, pin, ownerKey, backup) => sign("register", url, u, pin, ownerKey, backup);
+  // Log out: tell the server, then forget the server, the session and the user on this device (the data stays on the server).
+  async function logout() {
+    try { if (enabled()) await call("POST", "/api/logout", { timeout: 8000 }); } catch (e) { /* the session simply expires later */ }
+    cfg = { url: "", backup: "", token: "", auto: false, user: "", role: "" }; store.set(KEY, cfg); active = "";
+  }
+  const profile = () => ({ user: cfg.user, role: cfg.role, loggedIn: !!(cfg.user && cfg.token) });
+  const listMine = () => call("GET", "/api/videos");
+  const adminUsers = () => call("GET", "/api/admin/users");
+  const adminVideos = (name) => call("GET", "/api/admin/users/" + encodeURIComponent(name) + "/videos");
+  const adminPin = (name, pin) => call("POST", "/api/admin/users/" + encodeURIComponent(name) + "/pin", { json: { pin } });
+  const adminDelete = (name) => call("DELETE", "/api/admin/users/" + encodeURIComponent(name));
+  const delVideoId = (id) => call("DELETE", "/api/videos/" + id);
+  const delClipId = (id, cid) => call("DELETE", "/api/videos/" + id + "/clips/" + cid);
+  // Download the original video or a finished clip back as a Blob.
+  async function fetchBlob(path, onProgress) {
+    const res = await call("GET", path, { raw: true, timeout: 600000 });
+    if (!res.ok) throw new CloudError("download failed (" + res.status + ")", res.status);
+    const total = +res.headers.get("Content-Length") || 0, rd = res.body.getReader(), parts = []; let got = 0;
+    for (;;) { const r = await rd.read(); if (r.done) break; parts.push(r.value); got += r.value.length; onProgress && total && onProgress(got / total); }
+    return new Blob(parts, { type: "video/mp4" });
+  }
+  // Keep a finished Short on the server too (best effort, never throws).
+  async function putClip(v, clip, blob) {
+    try {
+      if (!enabled() || !cfg.user || !v.remote || !v.remote.id || !blob || blob.size > 95 * 1024 * 1024) return false;
+      await call("PUT", "/api/videos/" + v.remote.id + "/clips/" + clip.id + "?name=" + encodeURIComponent(v.name.replace(/\.[^.]+$/, "") + "_short" + clip.id + ".mp4"), { body: blob, timeout: 300000 });
+      return true;
+    } catch (e) { console.warn("Could not keep the clip on the server:", errText(e)); return false; }
+  }
+
   const canRender = () => { try { return store.get("cloudCanRender", true) !== false; } catch (e) { return true; } };
-  return { canRender, enabled, getConfig, setConfig, test, upload, submit, jobs, cancelJobs, status, download, remove, flushDeletes, purge, pendingDeletes, CloudError };
+  return { login, register, logout, profile, listMine, adminUsers, adminVideos, adminPin, adminDelete, delVideoId, delClipId, fetchBlob, putClip, canRender, enabled, getConfig, setConfig, test, upload, submit, jobs, cancelJobs, status, download, remove, flushDeletes, purge, pendingDeletes, CloudError };
 })();
