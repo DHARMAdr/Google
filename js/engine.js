@@ -286,12 +286,13 @@ const Engine = (function () {
       rg[k] = c.getContext("2d", { willReadFrequently: true });
     });
     return function read(vid) {
+      const sw = vid.videoWidth || vid.displayWidth, sh = vid.videoHeight || vid.displayHeight;      // a <video> or a decoded VideoFrame
       g.drawImage(vid, 0, 0, geom.W, geom.H);
       const px = g.getImageData(0, 0, geom.W, geom.H).data;            // <-- a tainted canvas throws HERE
       const rp = {};
       for (const k of Object.keys(geom.regs)) {
         const R = geom.regs[k], r = R.r;
-        rg[k].drawImage(vid, r.x * vid.videoWidth, r.y * vid.videoHeight, r.w * vid.videoWidth, r.h * vid.videoHeight, 0, 0, R.w, R.h);
+        rg[k].drawImage(vid, r.x * sw, r.y * sh, r.w * sw, r.h * sh, 0, 0, R.w, R.h);
         rp[k] = rg[k].getImageData(0, 0, R.w, R.h).data;
       }
       return { px, rp };
@@ -402,6 +403,116 @@ const Engine = (function () {
         return { px: frames[0][j], rp };
       },
       close() { frames = null; try { Exporter.unmountVideo(v); } catch (e) { /* ignore */ } }
+    };
+  }
+
+
+  /* ---------------------------------------------------------------
+     "decoder" SOURCE (v5.4) - the FAST way, and it also works with the screen off.
+     WHY: the "stream" source plays the video in a hidden <video> element. Phones pause such hidden playback
+     whenever the screen turns off or the tab is not in front ("video-only background media was paused to
+     save power"), and a 30-minute video then takes hours. Here we do NOT play anything: the small mp4box
+     library reads the file's index, we hand the compressed pictures straight to the phone's hardware
+     decoder (WebCodecs VideoDecoder), and take a picture whenever the next sample time is reached.
+     Decoding runs as fast as the chip can (hundreds of pictures per second) and is not paused in the background.
+     HOW IT WORKS: 1) read the index once (cached on the video) 2) start at the key picture before the first
+     wanted time 3) feed 24 compressed pictures at a time 4) frames that are too early are closed at once
+     (a decoder stops when too many frames stay open).
+     HOW TO IMPROVE: skip decoding of non-reference frames, use several decoders for long videos,
+     support WebM/VP9 by reading the index with another small library.                              */
+  function loadMp4Info(v) {
+    if (v._dec) return v._dec;
+    v._dec = (async () => {
+      if (typeof MP4Box === "undefined") throw new Error("the mp4box library is not loaded");
+      const file = v.file, mp4 = MP4Box.createFile();
+      let info = null, err = null;
+      mp4.onError = (e) => { err = e; }; mp4.onReady = (i) => { info = i; };
+      let pos = 0, guard = 0;
+      while (!info && !err && pos < file.size && guard++ < 600) {
+        const ab = await file.slice(pos, Math.min(file.size, pos + 4 * 1048576)).arrayBuffer();
+        ab.fileStart = pos;
+        const next = mp4.appendBuffer(ab);
+        pos = (typeof next === "number" && next > pos) ? next : pos + ab.byteLength;       // the library tells where the index (moov) continues, even at the end of the file
+      }
+      if (!info) throw new Error("could not read the MP4 index" + (err ? ": " + err : ""));
+      const vt = info.videoTracks && info.videoTracks[0];
+      if (!vt) throw new Error("no video track in the MP4 index");
+      if (v.w && v.h && (Math.abs(vt.video.width - v.w) > 2 || Math.abs(vt.video.height - v.h) > 2)) throw new Error("the picture is rotated/scaled in the file (" + vt.video.width + "x" + vt.video.height + " vs " + v.w + "x" + v.h + ")");
+      const trak = mp4.getTrackById(vt.id), samples = trak.samples;
+      if (!samples || !samples.length) throw new Error("the MP4 index has no sample list");
+      const entry = trak.mdia.minf.stbl.stsd.entries[0], box = entry.avcC || entry.hvcC;
+      let description;
+      if (box) { const DS = (typeof DataStream !== "undefined") ? DataStream : MP4Box.DataStream, ds = new DS(undefined, 0, DS.BIG_ENDIAN); box.write(ds); description = new Uint8Array(ds.buffer, 8); }
+      else if (!/^(vp0?9|av01)/.test(vt.codec)) throw new Error("unknown video codec " + vt.codec);
+      const config = { codec: vt.codec, codedWidth: vt.video.width, codedHeight: vt.video.height, hardwareAcceleration: "prefer-hardware" };
+      if (description) config.description = description;
+      let sup = await VideoDecoder.isConfigSupported(config);
+      if (!sup.supported) { delete config.hardwareAcceleration; sup = await VideoDecoder.isConfigSupported(config); }
+      if (!sup.supported) throw new Error("this device cannot decode " + vt.codec);
+      const n = samples.length, cts = new Float64Array(n), dur = new Float64Array(n), off = new Float64Array(n), size = new Uint32Array(n), sync = new Uint8Array(n);
+      for (let k = 0; k < n; k++) { const sm = samples[k]; cts[k] = sm.cts / sm.timescale; dur[k] = sm.duration / sm.timescale; off[k] = sm.offset; size[k] = sm.size; sync[k] = sm.is_sync ? 1 : 0; }
+      return { n, cts, dur, off, size, sync, config, codec: vt.codec };
+    })();
+    v._dec.catch(() => { v._dec = null; });
+    return v._dec;
+  }
+
+  function makeDecoderSource(v, geom, fps) {
+    const step = 1 / fps;
+    let info = null, dec = null, read = null, frames = [], si = 0, flushed = false, err = null, wantT = 0, lastFr = null, lastOut = 0, waiters = [];
+    const wake = () => { const w = waiters; waiters = []; w.forEach((f) => f()); };
+    // wait for the decoder to produce something (or fail after 20 s of silence)
+    const waitOutput = () => new Promise((resolve, reject) => {
+      const t = setTimeout(() => { waiters = waiters.filter((x) => x !== done); reject(new Error("Decoder stalled (no pictures for 20 s).")); }, 20000);
+      const done = () => { clearTimeout(t); resolve(); };
+      waiters.push(done);
+    });
+    async function feedMore() {
+      if (si >= info.n) { await dec.flush(); flushed = true; return; }
+      if (dec.decodeQueueSize > 12 || frames.length > 6) { await waitOutput(); return; }      // do not run far ahead of the reader
+      const end = Math.min(info.n, si + 24);
+      let lo = Infinity, hi = 0;
+      for (let k = si; k < end; k++) { lo = Math.min(lo, info.off[k]); hi = Math.max(hi, info.off[k] + info.size[k]); }
+      const ab = await v.file.slice(lo, hi).arrayBuffer();
+      for (let k = si; k < end; k++) {
+        dec.decode(new EncodedVideoChunk({ type: info.sync[k] ? "key" : "delta", timestamp: Math.round(info.cts[k] * 1e6), duration: Math.round(info.dur[k] * 1e6), data: new Uint8Array(ab, info.off[k] - lo, info.size[k]) }));
+      }
+      si = end;
+      lastOut = performance.now();
+    }
+    return {
+      name: "decoder",
+      async open(startIdx) {
+        info = await loadMp4Info(v);
+        read = makePixelReader(geom);
+        const target = Math.max(0, (startIdx || 0) * step);
+        wantT = target - 0.02; si = 0;
+        for (let k = 0; k < info.n; k++) { if (info.sync[k] && info.cts[k] <= target + 1e-6) si = k; }     // last key picture at or before the start
+        dec = new VideoDecoder({
+          output: (f) => { lastOut = performance.now(); if (f.timestamp / 1e6 < wantT) f.close(); else frames.push(f); wake(); },
+          error: (e) => { err = e; wake(); }
+        });
+        dec.configure(info.config);
+      },
+      async grab(i, t) {
+        wantT = t - 1e-4;
+        for (;;) {
+          if (err) throw err;
+          while (frames.length && frames[0].timestamp / 1e6 < wantT) frames.shift().close();
+          if (frames.length) {
+            const f = frames.shift();
+            try { lastFr = { px: null, rp: null, mt: f.timestamp / 1e6 }; const r = read(f); lastFr.px = r.px; lastFr.rp = r.rp; } finally { f.close(); }
+            return lastFr;
+          }
+          if (flushed) { if (lastFr) return lastFr; throw new Error("The decoder returned no pictures."); }
+          await feedMore();
+        }
+      },
+      close() {
+        try { frames.forEach((f) => f.close()); frames = []; } catch (e) { /* ignore */ }
+        try { if (dec && dec.state !== "closed") dec.close(); } catch (e) { /* ignore */ }
+        dec = null;
+      }
     };
   }
 
@@ -644,11 +755,34 @@ const Engine = (function () {
       } finally { try { src.close(); } catch (e) { /* ignore */ } }
     }
 
+    // ---- stage 0: the DECODER reader (hardware decoding, no playback, works with the screen off) ----
+    if (!opts.noDecoder && !v.deadSources.decoder && typeof VideoDecoder !== "undefined" && typeof EncodedVideoChunk !== "undefined" && typeof MP4Box !== "undefined") {
+      const s0 = performance.now(), Nd = Math.max(1, Math.min(2, parts)), queueD = segs.filter((g) => g.cur < g.b);
+      await Promise.all(Array.from({ length: Nd }, (_, k) => (async () => {
+        while (queueD.length) {
+          const seg = queueD.shift();
+          try { await runSeg(seg, makeDecoderSource(v, geom, fps), "decoder#" + k); }
+          catch (e) {
+            if (e && e.message === CANCEL) throw e;
+            seg.err = e;
+            rec.attempts.push({ step: "frames", strategy: "decoder#" + k + " (hardware decoder)", ok: false, error: errText(e), ms: Math.round(performance.now() - s0), note: "stopped at sample " + seg.cur + " of " + total });
+            console.warn("Decoder reader " + k + " failed:", e);
+            if (!segs.some((g) => g.cur > g.a)) { v.deadSources.decoder = true; queueD.length = 0; break; }       // never worked here: do not try again for this video
+          }
+        }
+      })()));
+      if (segs.every((g) => g.cur >= g.b)) {
+        rec.frameSource = "decoder x" + Nd;
+        rec.attempts.push({ step: "frames", strategy: "decoder x" + Nd + " (hardware decoder, no playback)", ok: true, ms: Math.round(performance.now() - s0) });
+        return out;
+      }
+    }
+
     // ---- stage 1: fast stream readers, all parts at once ----
     if (N > 0) {
       const rate = clamp(0.4 * 60 * step, 1, 8);       // about 0.4 samples per screen refresh (at most 8x) so no sample is skipped
       const s0 = performance.now();
-      const queue = segs.slice();
+      const queue = segs.filter((g) => g.cur < g.b);
       await Promise.all(Array.from({ length: N }, (_, k) => (async () => {
         while (queue.length) {
           const seg = queue.shift();

@@ -17,7 +17,12 @@
 const $ = (id) => document.getElementById(id);
 
 // Wait one "tick" so the browser can redraw the page during long loops.
-const tick = () => new Promise((r) => setTimeout(r, 0));
+// A short pause so the page can breathe. A MessageChannel is used instead of setTimeout because browsers slow
+// setTimeout down to once per second (or minute) when the tab is in the background, which made analysis crawl.
+const tick = (() => {
+  try { const ch = new MessageChannel(), q = []; ch.port1.onmessage = () => { const f = q.shift(); f && f(); }; return () => new Promise((r) => { q.push(r); ch.port2.postMessage(0); }); }
+  catch (e) { return () => new Promise((r) => setTimeout(r, 0)); }
+})();
 
 // Keep a number between lo and hi.
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
