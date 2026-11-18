@@ -265,3 +265,7 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 - FIX 2 (util.js `tick`): MessageChannel yield instead of setTimeout(0), so progress is not throttled in the background.
 - Tests (desktop Chrome, synthetic): 30-min 768x480 H.264 with B-frames and index at the end of the file -> frame scan 80 s, whole analysis 87 s (stream reader on the same machine took ~2.5x longer on short clips); truth2.mp4 3 s vs 7 s; WebM falls back to the stream reader; results identical. NOT tested on the real phone (hardware decoder, background behaviour).
 - Tip for users: keep the tab open; with the decoder reader a locked screen no longer freezes the scan, but some phones still freeze a whole tab after many minutes.
+
+### Round 14b - Fix: "Cannot read properties of null (reading 'addEventListener')" (v5.4.1)
+- Report CC-MWLSZ9CP: profile.js:178 ran against an OLD cached index.html (no #pfServer yet) because the browser's HTTP cache served index.html and the scripts from different versions.
+- Fix: profile.js uses a null-safe `on(id, event, fn)` helper (a missing element is skipped with a console hint, never crashes the script); sw.js now fetches every page/script with `cache: "no-cache"` (revalidate, quick 304) so versions cannot be mixed; cache name clipcutter-v14.
