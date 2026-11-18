@@ -107,6 +107,15 @@ const Compat = (function () {
     } catch (e) { /* nothing to clean */ }
   }
 
+  // Delete ONE stored copy right now (used when a video was moved to the server). Never throws.
+  async function removeCopy(name) {
+    try {
+      if (!name || !(navigator.storage && navigator.storage.getDirectory)) return;
+      const root = await navigator.storage.getDirectory(), dir = await root.getDirectoryHandle(DIR);
+      for await (const [n] of dir.entries()) if (n === name || n.startsWith(name + "_")) await dir.removeEntry(n).catch(() => {});
+    } catch (e) { /* already gone */ }
+  }
+
   // Is the file still readable? (Android / another window can make it vanish.) Returns true / false.
   async function readable(file) { try { await file.slice(0, 2048).arrayBuffer(); return true; } catch (e) { return false; } }
 
@@ -162,5 +171,5 @@ const Compat = (function () {
   // A wake lock is dropped when the tab is hidden. Ask again when it comes back.
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && lockUsers && !lock) { try { navigator.wakeLock.request("screen").then((l) => { lock = l; l.addEventListener("release", () => (lock = null)); }).catch(() => {}); } catch (e) { /* ignore */ } } });
 
-  return { stableCopy, cleanOld, openCopy, readable, keepAwake, guessType };
+  return { stableCopy, removeCopy, cleanOld, openCopy, readable, keepAwake, guessType };
 })();

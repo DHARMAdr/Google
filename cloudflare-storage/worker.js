@@ -28,7 +28,7 @@
    ===================================================================== */
 
 const CHUNK = 8 * 1024 * 1024;          // size of one piece (the site asks for this size)
-const VERSION = "storage-2.0";
+const VERSION = "storage-2.1";
 
 const json = (data, status, cors) => new Response(JSON.stringify(data), { status: status || 200, headers: Object.assign({ "Content-Type": "application/json" }, cors || {}) });
 
@@ -69,7 +69,7 @@ async function usedBytes(env) { return (await listAll(env, "v/")).reduce((s, o) 
 async function state(env, m) {
   const pieces = await listAll(env, "v/" + m.id + "/c/");
   const received = pieces.map((o) => parseInt(o.key.split("/").pop(), 10)).sort((a, b) => a - b);
-  return { id: m.id, name: m.name, owner: m.owner, size: m.size, chunkSize: CHUNK, totalChunks: m.totalChunks, received, complete: !!m.complete, clips: m.clips || {}, created: m.created, jobs: {}, serverTime: Date.now() };
+  return { id: m.id, name: m.name, owner: m.owner, size: m.size, chunkSize: CHUNK, totalChunks: m.totalChunks, received, complete: !!m.complete, clips: m.clips || {}, created: m.created, jobs: {}, serverTime: Date.now(), project: m.project || null };
 }
 
 /* ---------- profiles (username + 6-digit code) ---------- */
@@ -136,7 +136,11 @@ export default {
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
     const url = new URL(req.url), p = url.pathname.replace(/\/+$/, "");
     try {
-      if (p === "/api/health") return json({ ok: true, app: "clipcutter-server", version: VERSION, storageOnly: true, profiles: true }, 200, cors);
+      if (p === "/api/health") {
+        // Extra facts so the site's "Check server" pop-up can say WHY something does not work (no secrets are shown, only yes/no).
+        const origin = req.headers.get("Origin"), list = (env.ALLOWED_ORIGINS || "https://dharmadr.github.io").split(",").map((x) => x.trim());
+        return json({ ok: true, app: "clipcutter-server", version: VERSION, storageOnly: true, profiles: true, bucketBound: !!env.BUCKET, tokenSet: !!env.TOKEN, openSignup: String(env.OPEN_SIGNUP || "1") !== "0", originSeen: origin || "", originAllowed: !!origin && (list.includes("*") || list.includes(origin)), state: true }, 200, cors);
+      }
       if (!env.TOKEN) return json({ error: "the server has no TOKEN secret yet (add the secret named TOKEN)" }, 500, cors);
 
       /* ----- sign up / log in (no token needed) ----- */
@@ -227,6 +231,16 @@ export default {
 
       if (sub === "" && req.method === "GET") { meta.touched = Date.now(); await writeMeta(env, meta); return json(await state(env, meta), 200, cors); }
       if (sub === "" && req.method === "DELETE") return json({ ok: await deleteVideo(env, id) }, 200, cors);
+
+      // The editing state (clips, trim points, thumbnail) is kept next to the video, so a device whose browser data was
+      // cleared can get the work back after logging in.
+      if (sub === "/project" && req.method === "PUT") {
+        const txt = await req.text();
+        if (txt.length > 400000) return json({ error: "project data too large" }, 413, cors);
+        let obj; try { obj = JSON.parse(txt); } catch (e) { return json({ error: "bad json" }, 400, cors); }
+        meta.project = obj; meta.projectAt = Date.now(); await writeMeta(env, meta);
+        return json({ ok: true }, 200, cors);
+      }
 
       if (sub === "/chunk" && req.method === "PUT") {
         const index = parseInt(url.searchParams.get("index"), 10);

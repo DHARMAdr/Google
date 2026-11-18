@@ -172,7 +172,7 @@ async function addFiles(files, opts) {
     if (Cloud.enabled() && Cloud.getConfig().auto) {            // optional: send it to the server in the background
       Compat.keepAwake(true);
       Cloud.upload(v, (f) => setStatus("Sending " + v.name + " to your server... " + Math.round(f * 100) + "%", f), { cancel: false })
-        .then(() => { setStatus(v.name + " is on your server.", 1); renderLib(); })
+        .then(() => { setStatus(v.name + " is on your server." + (Cloud.getConfig().offload ? " This device's copy is removed automatically when you are not using it." : ""), 1); renderLib(); })
         .catch((e) => { setStatus("Upload to the server failed: " + errText(e), 0, true); reportProblem(e, { recovered: "partial", stage: "cloud upload", show: "toast" }); })
         .finally(() => Compat.keepAwake(false));
     }
@@ -202,6 +202,7 @@ function probe(v) {
   });
 }
 
+const sizeOf = (v) => v.sizeBytes || v.file.size;      // an offloaded video has no local file, its size is remembered
 function renderLib() {
   const box = $("libList");
   box.innerHTML = "";
@@ -214,11 +215,12 @@ function renderLib() {
         ${v.thumb ? `<img src="${v.thumb}" alt="">` : `<div class="thumb-ph"></div>`}
         <div style="min-width:0">
           <div class="name">${esc(v.name)}</div>
-          <div class="sub">${fmt(v.duration)} | ${v.w}x${v.h} | ${(v.file.size / 1048576).toFixed(1)} MB | ${v.clips.length} clip(s)${v.an ? " | analysed" : ""}${v.remote ? (v.remote.complete ? " | on your server" : " | uploading...") : ""}${kills ? " | " + kills + " kill(s)" : ""}</div>
+          <div class="sub">${fmt(v.duration)} | ${v.w}x${v.h} | ${(sizeOf(v) / 1048576).toFixed(1)} MB${v.offloaded ? " | only on your server" : ""} | ${v.clips.length} clip(s)${v.an ? " | analysed" : ""}${v.remote ? (v.remote.complete ? " | on your server" : " | uploading...") : ""}${kills ? " | " + kills + " kill(s)" : ""}</div>
         </div>
       </div>
       <div class="row">
         <button class="ghost small" data-vact="select" data-id="${v.id}">${v === cur ? "Selected" : "Select"}</button>
+        ${v.remote && v.remote.complete && !v.offloaded ? `<button class="ghost small" data-vact="offload" data-id="${v.id}">Free space</button>` : ""}
         <button class="danger small" data-vact="delete" data-id="${v.id}">Delete</button>
       </div>`;
     box.appendChild(el);
@@ -233,6 +235,7 @@ $("libList").addEventListener("click", (e) => {
   if (!v) return;
   if (b.dataset.vact === "select") selectVideo(v);
   if (b.dataset.vact === "delete") deleteVideo(v);
+  if (b.dataset.vact === "offload") { if (analysing || exporting) alert("Please wait for the current work to finish."); else if (confirm("Remove the copy on this device? The video stays safe on your server and comes back automatically when you open it.")) offloadVideo(v); }
 });
 
 $("deleteAllBtn").addEventListener("click", () => {
@@ -263,7 +266,7 @@ function removeVideo(v) {
 }
 
 function afterLibraryChange() {
-  if (!cur && lib.length) selectVideo(lib[0]);
+  if (!cur && lib.length) selectVideo(lib[0], true);
   else if (!cur) {
     player.removeAttribute("src"); player.load();
     ["sec-studio", "sec-analyse", "sec-clips", "sec-export"].forEach((id) => ($(id).hidden = true));
@@ -272,15 +275,17 @@ function afterLibraryChange() {
   renderLib(); renderStats();
 }
 
-function selectVideo(v) {
+function selectVideo(v, passive) {
   cur = v;
+  // 'passive' = the site selected it by itself on start-up: do not download yet, wait until the user opens it.
+  if (v.offloaded && !passive) bringBack(v).then((ok) => { if (ok && cur === v) selectVideo(v, true); });
   if (v.url || v.previewUrl) player.src = v.previewUrl || v.url; else { player.removeAttribute("src"); player.load(); }
   $("meta").textContent = v.name + "  |  " + fmt(v.duration) + "  |  " + v.w + "x" + v.h + (v.noPlay ? "  |  format " + v.codec + " (not playable here" + (v.previewUrl ? ", showing a small preview copy" : "") + ")" : "");
   $("proxyBtn").hidden = !(v.noPlay && !v.previewUrl);
   ["sec-studio", "sec-analyse", "sec-clips", "sec-export"].forEach((id) => ($(id).hidden = false));
   $("inT").value = v.inT.toFixed(1); $("outT").value = v.outT.toFixed(1);
   renderLib(); renderClips(); drawTimeline(); drawLab(); renderEventTable(); updateAnState(); renderStats();
-  setStatus(v.an ? "Analysed. Change settings to re-pick clips." : "Ready. Press Find my highlights, or trim by hand.", 0);
+  setStatus(v.offloaded ? (passive ? "This video is on your server. Press Select on it to bring it back." : "Bringing it back from your server...") : v.an ? "Analysed. Change settings to re-pick clips." : "Ready. Press Find my highlights, or trim by hand.", 0);
 }
 
 // The live numbers at the top of the page.
@@ -446,7 +451,7 @@ function getRegions(profileId) {
 }
 function analysisKey(P) {
   if (P.method === "classic") return "classic";
-  return (P.method === "hunter" ? "hunter|" + (typeof Teach !== "undefined" && Teach.get() ? "name" + Teach.get().id + "|" : "") : "smart|") + P.fps + "|" + JSON.stringify(getRegions(P.profile));
+  return (P.method === "hunter" ? "hunter|" + (typeof Teach !== "undefined" && Teach.get() ? "name" + Teach.get().id + "|" : "auto|") : "smart|") + P.fps + "|" + JSON.stringify(getRegions(P.profile));
 }
 
 function setAState(text, p, err) {
@@ -468,15 +473,22 @@ async function doAnalyse(v) {
   if (!(await ensureFile(v))) { setAState(FILE_GONE, 0, true); reportProblem(new Error(FILE_GONE), { recovered: false, stage: "analyse" }); return false; }
 
   const prof = PROFILES[P.profile];
-  const fps = classic ? 1 : P.fps;
+  let fps = classic ? 1 : P.fps;
   const tpl = !classic && P.method === "hunter" && typeof Teach !== "undefined" ? Teach.get() : null;        // the taught picture of the user's name (or null)
+  const autoName = !classic && P.method === "hunter" && !tpl && typeof AutoName !== "undefined";      // no taught name: find it automatically
+  if (!classic && P.method === "hunter" && fps > 4) fps = 4;       // name matching only needs ~4 pictures per second (a kill-feed line stays visible for seconds): much faster
   const regions = classic ? {} : Object.assign({}, getRegions(P.profile), tpl ? { killfeed: Teach.region(tpl) } : {});
   aCtl = { cancel: false };
   setBusy(true); setAState("Starting...", 0.01); Compat.keepAwake(true);
   try {
-    v.an = await Engine.analyse(v, { fps, regions, hunt: P.method === "hunter", tpl, profile: classic ? "auto" : P.profile, height: fps >= 10 ? 144 : 108, regionWidth: tpl ? 480 : fps >= 30 ? 320 : 240 },
+    v.an = await Engine.analyse(v, { fps, regions, hunt: P.method === "hunter", tpl, profile: classic ? "auto" : P.profile, height: fps >= 10 ? 144 : 108, regionWidth: tpl || autoName ? 480 : fps >= 30 ? 320 : 240, collect: autoName ? { vw: v.w, vh: v.h } : null },
       aCtl, (f, text) => setAState(typeof text === "string" ? text : "Working...", f));
     v.anKey = key;
+    if (autoName && !v.an.partial && v.an.rows) {
+      setAState("Learning which kill-feed name is yours...", 0.97);
+      try { v.an.auto = await AutoName.run(v.an, (f, t) => setAState(t, 0.97 + 0.03 * f)); }
+      catch (e) { v.an.auto = { ok: false, reason: errText(e) }; console.warn("AutoName failed:", e); }
+    }
     const rec = v.an.recovery, failed = rec ? rec.attempts.filter((a) => !a.ok) : [];
     if (v.an.partial) {
       setAState("Finished using SOUND ONLY (pictures could not be read). See the report.", 1, true);
@@ -539,7 +551,8 @@ $("analyseBtn").addEventListener("click", async () => {
   if (!(await doAnalyse(v))) return;
   applySuggestions(v);
   const n = v.clips.filter((c) => c.auto).length;
-  const st = v.det && v.det.stats, why = st ? " Moments checked: " + st.candidates + (Object.keys(st.reasons).length ? " - rejected: " + Object.entries(st.reasons).map(([k, c]) => c + "x " + k).join("; ") : "") + "." : "";
+  let st = v.det && v.det.stats, autoNote = v.an && v.an.auto ? (v.an.auto.ok ? " Your name was found automatically (" + v.an.auto.stats.learned.withGun + " matching kills)." : " Automatic name search did not work (" + v.an.auto.reason + "), so the clue method was used.") : "", why = st ? " Moments checked: " + st.candidates + (Object.keys(st.reasons).length ? " - rejected: " + Object.entries(st.reasons).map(([k, c]) => c + "x " + k).join("; ") : "") + "." : "";
+  why += autoNote;
   setAState(n ? "Found " + n + " clip(s) around kills (" + (P.method === "hunter" ? "Main-player kills only" : P.method) + "). Scroll down to check them." + (v.relaxed ? " (Nothing passed the strict test, so easier settings were used - please check each clip.)" : "") : "No kill of the main player was recognised (method: " + (P.method === "hunter" ? "Main-player kills only" : P.method) + ")." + why + " Try Sensitivity 1.5-2, Deep detail (10 fps), or check the kill-feed box with Calibrate.", 1);
   if (n) { toast("Found " + n + " highlight clip(s)."); $("sec-clips").scrollIntoView({ behavior: "smooth" }); }
 });
@@ -822,6 +835,7 @@ function clipFileName(v, clip, ext) {
 // Make sure the video's stored file can still be read. If another window removed it, try to open it again from private
 // storage; if it is truly gone, say so clearly (instead of 4 confusing retries).
 async function ensureFile(v) {
+  if (v.offloaded && !(await bringBack(v))) return false;
   if (await Compat.readable(v.file)) return true;
   if (v.copyName) {
     try {
@@ -1187,7 +1201,7 @@ window.addEventListener("beforeunload", (e) => { if (exporting || analysing) { e
 const savedJson = new Map();                         // copyName -> last saved JSON (to skip unchanged ones)
 function snapshotVideo(v) {
   return {
-    key: v.copyName, name: v.name, type: v.origType || v.file.type, size: v.file.size, lastModified: v.origModified || v.file.lastModified,
+    key: v.copyName, offloaded: !!v.offloaded, name: v.name, type: v.origType || v.file.type || "video/mp4", size: sizeOf(v), lastModified: v.origModified || v.file.lastModified,
     duration: v.duration, w: v.w, h: v.h, noPlay: v.noPlay, codec: v.codec, thumb: v.thumb, inT: v.inT, outT: v.outT,
     remote: v.remote ? { id: v.remote.id, complete: !!v.remote.complete, pending: v.remote.pending || [] } : null,
     clips: v.clips.map((c) => { const o = Object.assign({}, c); delete o.out; delete o.status; return o; }),
@@ -1204,18 +1218,120 @@ setInterval(() => {
   });
 }, 3000);
 
+
+/* =====================================================================
+   SERVER SYNC (v5.3): move a video to the server and free this device, bring it back when needed,
+   keep the editing state (clips, trim points) on the server, and rebuild the library from the server
+   when this browser's data was cleared.
+   WHY: phones have little space; the server (your own Cloudflare R2) has plenty. The local IndexedDB/OPFS
+   copy still works as before, the server is a second, safer place.
+   HOW TO IMPROVE: sync the finished Shorts back too, download in the background while you watch.
+   ===================================================================== */
+let lastActivity = Date.now();
+["pointerdown", "keydown", "touchstart"].forEach((e) => window.addEventListener(e, () => { lastActivity = Date.now(); }, { passive: true }));
+
+// Remove this device's copy of a video that is complete on the server.
+async function offloadVideo(v) {
+  if (!v || v.offloaded || !(v.remote && v.remote.complete)) return false;
+  try {
+    const st = await Cloud.status(v);                                        // make sure the server really has all of it
+    if (!st.complete) return false;
+  } catch (e) { return false; }
+  const old = v.copyName, size = v.file.size;
+  try { Exporter.unmountVideo(v); } catch (e) { /* ignore */ }
+  if (v.url) { URL.revokeObjectURL(v.url); v.url = ""; }
+  if (v.previewUrl) { URL.revokeObjectURL(v.previewUrl); v.previewUrl = ""; }
+  v.sizeBytes = size; v.offloaded = true; v.copyHow = "on your server";
+  v.file = new File([""], v.name, { type: v.origType || "video/mp4" });
+  v.an = v.an;                                                               // the analysis stays in memory: it is small
+  v.copyName = "off-" + v.remote.id;                                         // set FIRST, so the autosave cannot re-create the old record
+  if (old) { await Persist.del(old).catch(() => {}); await Compat.removeCopy(old); }
+  if (cur === v) { player.removeAttribute("src"); player.load(); }
+  renderLib(); toast(v.name + ": the copy on this device was removed (it is safe on your server).");
+  return true;
+}
+
+// Download an offloaded video from the server and store it on this device again. Returns true on success.
+function bringBack(v) {
+  if (!v.offloaded) return Promise.resolve(true);
+  if (v.bringing) return v.bringing;
+  v.bringing = (async () => {
+    try {
+      if (!Cloud.enabled()) throw new Error("This video is only on your server. Open Profile and log in again to bring it back.");
+      const blob = await Cloud.fetchBlob("/api/videos/" + v.remote.id + "/file", (f) => setStatus("Bringing " + v.name + " back from your server... " + Math.round(f * 100) + "%", f));
+      const file = new File([blob], v.name, { type: v.origType || "video/mp4" });
+      const c = await Compat.stableCopy(file, (f) => setStatus("Saving " + v.name + " on this device... " + Math.round(f * 100) + "%", f));
+      const old = v.copyName;
+      v.file = c.file; v.copyHow = c.how; v.cleanup = c.cleanup; v.copyName = c.name || ""; v.sizeBytes = 0; v.offloaded = false;
+      if (old && old !== v.copyName) Persist.del(old).catch(() => {});
+      if (!v.noPlay) v.url = URL.createObjectURL(v.file);
+      lastActivity = Date.now();
+      setStatus(v.name + " is back on this device.", 0); renderLib();
+      return true;
+    } catch (e) { setStatus("Could not bring the video back: " + errText(e), 0, true); return false; }
+    finally { v.bringing = null; }
+  })();
+  return v.bringing;
+}
+
+// Every 20 s: videos that are safely on the server and not in use are removed from this device (if the user wants that).
+setInterval(() => {
+  if (!Cloud.enabled() || Cloud.getConfig().offload === false || analysing || exporting) return;
+  for (const v of lib) {
+    if (v.offloaded || v.deleted || !(v.remote && v.remote.complete)) continue;
+    if (v === cur && Date.now() - lastActivity < 120000) continue;           // the video being worked on stays until you were idle for 2 minutes
+    offloadVideo(v); break;
+  }
+}, 20000);
+
+// Keep the editing state on the server (same moment as the local autosave, only when it changed).
+const syncedJson = new Map();
+setInterval(() => {
+  if (!Cloud.enabled() || !Cloud.profile().loggedIn) return;
+  for (const v of lib) {
+    if (v.deleted || !(v.remote && v.remote.complete)) continue;
+    const obj = { name: v.name, duration: v.duration, w: v.w, h: v.h, thumb: v.thumb, inT: v.inT, outT: v.outT, type: v.origType || "", noPlay: !!v.noPlay, codec: v.codec || "",
+      clips: v.clips.map((c) => { const o = Object.assign({}, c); delete o.out; delete o.status; return o; }) };
+    const j = JSON.stringify(obj);
+    if (syncedJson.get(v.remote.id) !== j && j.length < 380000) { syncedJson.set(v.remote.id, j); Cloud.putProject(v.remote.id, obj).catch(() => syncedJson.delete(v.remote.id)); }
+  }
+}, 5000);
+
+// Add placeholders for every video that is on the server but not in this library (new device or cleared browser data).
+async function pullFromServer() {
+  if (!Cloud.enabled() || !Cloud.profile().loggedIn) return 0;
+  let r; try { r = await Cloud.listMine(); } catch (e) { console.warn("Could not read the server library:", errText(e)); return 0; }
+  const me = Cloud.profile().user, skip = new Set(Cloud.pendingDeletes());
+  let added = 0;
+  for (const sv of r.videos || []) {
+    if (!sv.complete || skip.has(sv.id) || lib.some((x) => x.remote && x.remote.id === sv.id)) continue;
+    if (sv.owner && sv.owner !== me) continue;
+    const pj = sv.project || {};
+    const v = { id: videoSeq++, file: new File([""], sv.name, { type: pj.type || "video/mp4" }), name: sv.name, url: "", duration: pj.duration || 0, w: pj.w || 0, h: pj.h || 0, thumb: pj.thumb || "", an: null, anKey: "", det: null,
+      clips: (pj.clips || []).map((c) => Object.assign({}, c, { out: null, status: "" })), inT: pj.inT || 0, outT: pj.outT || Math.min(30, pj.duration || 30), deleted: false, noPlay: !!pj.noPlay, previewUrl: "", codec: pj.codec || "",
+      copyHow: "on your server", copyName: "off-" + sv.id, offloaded: true, sizeBytes: sv.size, origType: pj.type || "video/mp4", origModified: Date.now(), cleanup: null,
+      remote: { id: sv.id, complete: true, pending: [], options: null } };
+    clipSeq = Math.max(clipSeq, ...v.clips.map((c) => (+c.id || 0) + 1), 1);
+    lib.push(v); added++;
+  }
+  if (added) { renderLib(); renderStats(); if (!cur) selectVideo(lib[0], true); toast("Got " + added + " video(s) back from your server. They download when you open them."); }
+  return added;
+}
+window.pullFromServer = pullFromServer;
+
 async function restoreLibrary() {
   let recs = [];
   try { recs = await Persist.all(); } catch (e) { console.warn("No saved library:", errText(e)); }
   const keepCopies = [], keepOuts = [];
   for (const r of recs) {
     try {
-      const file = await Compat.openCopy(r.key, { name: r.name, type: r.type, lastModified: r.lastModified });
-      if (file.size !== r.size) throw new Error("stored copy is incomplete");
+      const file = r.offloaded ? new File([""], r.name, { type: r.type || "video/mp4" }) : await Compat.openCopy(r.key, { name: r.name, type: r.type, lastModified: r.lastModified });
+      if (!r.offloaded && file.size !== r.size) throw new Error("stored copy is incomplete");
       const v = { id: videoSeq++, file, name: r.name, url: "", duration: r.duration, w: r.w, h: r.h, thumb: r.thumb || "", an: null, anKey: "", det: null,
         clips: r.clips || [], inT: r.inT || 0, outT: r.outT || 0, deleted: false, noPlay: !!r.noPlay, previewUrl: "", codec: r.codec || "", copyHow: "private storage (OPFS)", copyName: r.key,
         origType: r.type, origModified: r.lastModified, cleanup: () => Compat.cleanOld(lib.map((x) => x.copyName).filter(Boolean)) };
-      if (!v.noPlay) v.url = URL.createObjectURL(file);
+      if (r.offloaded) { v.offloaded = true; v.sizeBytes = r.size; v.copyHow = "on your server"; v.url = ""; }
+      else if (!v.noPlay) v.url = URL.createObjectURL(file);
       v.remote = r.remote || null;
       const oldIds = v.clips.map((c) => c.id);
       v.clips.forEach((c) => { c.out = null; c.status = ""; });      // ids are kept: the server knows the clips by id
@@ -1227,13 +1343,13 @@ async function restoreLibrary() {
           if (idx >= 0) { v.clips[idx].out = { url: URL.createObjectURL(f), name: o.name, size: o.size, ext: o.ext, saved: o.file }; keepOuts.push(o.file); }
         } catch (e) { /* that file is gone */ }
       }
-      lib.push(v); keepCopies.push(r.key);
+      lib.push(v); if (!r.offloaded) keepCopies.push(r.key);
     } catch (e) { console.warn("Could not restore " + r.name + ":", errText(e)); Persist.del(r.key).catch(() => {}); }
   }
   Compat.cleanOld(keepCopies); Persist.cleanExports(keepOuts);
   // Videos that were being rendered on the server when the page closed: pick the results up now.
   if (Cloud.enabled()) for (const v of lib) if (v.remote && v.remote.pending && v.remote.pending.length) { setEStatus("Collecting clips your server rendered while the page was closed...", 0.3); pollCloud(v, false).then(() => setEStatus("Server clips collected.", 1)).catch((e) => { setEStatus("Could not collect server clips: " + errText(e), 0, true); }); }
-  if (lib.length) { renderLib(); renderStats(); if (!cur) selectVideo(lib[0]); toast("Restored " + lib.length + " video(s) from your last visit. Analyse again to refresh the Analysis Lab; clips and finished files are kept."); }
+  if (lib.length) { renderLib(); renderStats(); if (!cur) selectVideo(lib[0], true); toast("Restored " + lib.length + " video(s) from your last visit. Analyse again to refresh the Analysis Lab; clips and finished files are kept."); }
 }
 
 /* ---------- cloud dialog ---------- */
@@ -1295,7 +1411,7 @@ function diagContext() {
   if (!Exporter.turboAvailable()) { const o = $("engineSel").querySelector('option[value="turbo"]'); if (o) o.remove(); if ($("engineSel").value === "turbo") $("engineSel").value = "hq"; }
   refreshCloudUI();
   Cloud.flushDeletes();
-  restoreLibrary();
+  restoreLibrary().then(() => pullFromServer());
   if (typeof Diag !== "undefined") Diag.init(diagContext);   // error reports + pop-up
   syncUI();
   const missing = [];

@@ -134,6 +134,8 @@ const Hunter = (function () {
        params.sens : above 1 accepts weaker evidence (more kills), below 1 is stricter */
   function detect(an, params) {
     if (an.hasTemplate && an.ch.mine) return detectByName(an, params);
+    // AUTOMATIC NAME (js/autoname.js): the name was found by itself, so use the rows it matched.
+    if (an.auto && an.auto.ok) { const r = finish(an, params, an.auto.events, Object.assign({ candidates: an.auto.events.length, reasons: {} }, an.auto.stats)); return r; }
     const sens = params.sens || 1;
     const prof = PROFILES[params.profile] || PROFILES.shooter_tr;
     const { N, ch } = an;

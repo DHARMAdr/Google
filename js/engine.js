@@ -474,8 +474,15 @@ const Engine = (function () {
     return { best: top, count };
   }
 
-  function makeProcessor(geom, regs, regNames, out, tpl) {
+  function makeProcessor(geom, regs, regNames, out, tpl, collect) {
     const n = geom.W * geom.H;
+    // AUTO-NAME helper: when 'collect' is set we also keep a small picture of every NEW kill-feed row (see js/autoname.js).
+    let rowE = null, prevRowE = null, rowPx = 0;
+    if (collect && regs.killfeed) {
+      const R0 = regs.killfeed;
+      rowPx = Math.max(8, Math.round(0.05 * collect.vh * (R0.w / (R0.r.w * collect.vw))));   // a kill-feed row is about 5% of the picture height
+      rowE = new Uint16Array(R0.h);
+    }
     let T = null;
     if (tpl && regs.killfeed) T = scaleTemplate(tpl, regs.killfeed.w / (regs.killfeed.r.w * tpl.vw));
     let prevY = new Uint8Array(n), curY = new Uint8Array(n), prevHist = null, havePrev = false, lastRed = 0, redInit = false;
@@ -504,12 +511,13 @@ const Engine = (function () {
       for (const name of regNames) {
         const R = regs[name], rp = fr.rp[name], Yr = Ybuf[name];
         let edge = 0, white = 0;
+        if (rowE && name === "killfeed") rowE.fill(0);
         for (let y = 0; y < R.h; y++) {
           for (let x = 0, idx = y * R.w; x < R.w; x++, idx++) {
             const q = idx * 4;
             const y0 = (77 * rp[q] + 150 * rp[q + 1] + 29 * rp[q + 2]) >> 8;
             Yr[idx] = y0;
-            if (x > 0) { const gx = y0 - Yr[idx - 1]; if (gx > 60 || gx < -60) edge++; }   // sharp, high-contrast edge = text-like
+            if (x > 0) { const gx = y0 - Yr[idx - 1]; if (gx > 60 || gx < -60) { edge++; if (rowE && name === "killfeed") rowE[y]++; } }   // sharp, high-contrast edge = text-like
             if (y0 > 215) white++;                                                          // very bright pixel
           }
         }
@@ -522,6 +530,27 @@ const Engine = (function () {
         }
         L.edge = ed; L.white = wh; L.init = true;
         if (write) out.pulse[name][i] = hugeChange ? 0 : rise;
+        if (rowE && name === "killfeed") {
+          // Where did the NEW row appear? Compare the per-row text amount with the previous picture, also when the
+          // list scrolled by one row, and cut out the band that grew the most.
+          if (write && prevRowE && rise > 0.003 && !hugeChange && out.rows.length < 2500) {
+            let bestS = 0, bestErr = Infinity;
+            for (const sh of [0, rowPx, -rowPx]) {
+              let err = 0; for (let y = 0; y < R.h; y++) { const py = y - sh; err += Math.abs(rowE[y] - (py >= 0 && py < R.h ? prevRowE[py] : 0)); }
+              if (err < bestErr) { bestErr = err; bestS = sh; }
+            }
+            const res = new Float32Array(R.h);
+            for (let y = 0; y < R.h; y++) { const py = y - bestS; res[y] = Math.max(0, rowE[y] - (py >= 0 && py < R.h ? prevRowE[py] : 0)); }
+            let bestY = -1, bestV = 0, run = 0;
+            for (let y = 0; y < R.h; y++) { run += res[y]; if (y >= rowPx) run -= res[y - rowPx]; if (y >= rowPx - 1 && run > bestV) { bestV = run; bestY = y - rowPx + 1; } }
+            if (bestY >= 0 && bestV >= 6) {
+              const patch = new Uint8Array(R.w * rowPx);
+              for (let y = 0; y < rowPx; y++) patch.set(Yr.subarray((bestY + y) * R.w, (bestY + y + 1) * R.w), y * R.w);
+              out.rows.push({ t, i, w: R.w, h: rowPx, patch, grow: bestV });
+            }
+          }
+          prevRowE = Uint16Array.from(rowE);
+        }
         if (write && T && name === "killfeed" && R.w >= T.w && R.h >= T.h) { const m = matchTemplate(Yr, R.w, R.h, T); out.mine[i] = m.best; out.mineN[i] = m.count; }
       }
       if (write) { out.mask[i] = 1; out.t[i] = t; out.motion[i] = motion; out.flash[i] = flashFrac; out.red[i] = redRise; out.cut[i] = cut; }
@@ -540,7 +569,8 @@ const Engine = (function () {
     const cores = navigator.hardwareConcurrency || 4, mem = navigator.deviceMemory || 4;
     let n = Math.floor(cores / 2);
     if (mem <= 2) n = 1;
-    n = Math.max(1, Math.min(3, n));
+    if (cores >= 8 && mem >= 6) n = Math.max(n, 4);          // strong device (computer / flagship phone): one more reader
+    n = Math.max(1, Math.min(4, n));
     if (total < 150) n = 1;
     return n;
   }
@@ -561,7 +591,7 @@ const Engine = (function () {
     });
     const regNames = Object.keys(regs), geom = { W, H, regs };
     const out = { t: new Float32Array(total), motion: new Float32Array(total), flash: new Float32Array(total),
-                  red: new Float32Array(total), cut: new Uint8Array(total), mask: new Uint8Array(total), mine: new Float32Array(total).fill(-1), mineN: new Uint8Array(total), hasTpl: !!opts.tpl, pulse: {} };
+                  red: new Float32Array(total), cut: new Uint8Array(total), mask: new Uint8Array(total), mine: new Float32Array(total).fill(-1), mineN: new Uint8Array(total), rows: [], hasTpl: !!opts.tpl, pulse: {} };
     regNames.forEach((k) => (out.pulse[k] = new Float32Array(total)));
     v.deadSources = v.deadSources || {};
     const t0 = performance.now();
@@ -597,7 +627,7 @@ const Engine = (function () {
     // Run one part with one source from seg.cur to seg.b. Throws when the source breaks (seg.cur stays correct).
     async function runSeg(seg, src, label) {
       stageMark("analyse:frames", label + " samples " + seg.cur + "-" + seg.b + "/" + total);
-      const proc = makeProcessor(geom, regs, regNames, out, opts.tpl);
+      const proc = makeProcessor(geom, regs, regNames, out, opts.tpl, opts.collect);
       let first = true;
       try {
         // PRIMING: look at the sample just before, only to fill the "previous picture" memory, so a restart leaves no gap.
@@ -808,7 +838,7 @@ const Engine = (function () {
 
     return {
       dt: DT, N: chData.nG, ch: chData.ch, onsets: chData.onsets, audioOk,
-      hasVisual: !!vis, partial, windowed: !!windows, hasTemplate: !!(opts.tpl && vis), recovery: rec, fps: opts.fps, regions: opts.regions || {}, profileId: opts.profile,
+      rows: vis ? vis.rows || [] : [], hasVisual: !!vis, partial, windowed: !!windows, hasTemplate: !!(opts.tpl && vis), recovery: rec, fps: opts.fps, regions: opts.regions || {}, profileId: opts.profile,
       loudSec, motionSec, seconds: (performance.now() - t0) / 1000, duration: v.duration
     };
   }

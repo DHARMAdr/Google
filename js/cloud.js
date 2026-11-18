@@ -29,7 +29,7 @@
 const Cloud = (function () {
   "use strict";
   const KEY = "cloud", DEL_KEY = "cloudDeletes";
-  let cfg = Object.assign({ url: "", backup: "", token: "", auto: false, user: "", role: "" }, store.get(KEY, {}));
+  let cfg = Object.assign({ url: "", backup: "", token: "", auto: false, user: "", role: "", offload: true }, store.get(KEY, {}));
   let active = "";                                           // the address that answered fastest last time
 
   const norm = (u) => String(u || "").trim().replace(/\/+$/, "");
@@ -97,6 +97,73 @@ const Cloud = (function () {
     if (good.length) { out.ok = true; active = good[0].base; }
     if (out.info) { try { store.set("cloudCanRender", out.info.canRender !== false); } catch (e) { /* ignore */ } }   // storage-only servers (Cloudflare R2) cannot render
     return out;
+  }
+
+
+  /* ---------- SERVER CHECK (the "Server" pop-up) ----------
+     Runs a few small tests, one after the other, and explains in plain words WHAT is wrong and HOW to fix it.
+     Steps: 1) is the text a web address?  2) does anything answer (the "no-cors" probe works even when the
+     server forbids this site)?  3) can THIS site read the answer (CORS = the ALLOWED_ORIGINS setting)?
+     4) is it a ClipCutter server?  5) is it set up (R2 bucket, TOKEN secret)?  6) does login work (optional).
+     Returns { ok, steps:[{name, ok, text, fix}], health, report }  - report is a copyable text. */
+  async function diagnose(url, extra) {
+    const steps = [], base = norm(url), t00 = performance.now();
+    const add = (name, ok, text, fix) => steps.push({ name, ok, text, fix: fix || "" });
+    let health = null, fatal = false;
+    if (!/^https?:\/\/([^\s/]+\.[^\s/]+|localhost(:\d+)?)(\/|$)/i.test(base)) {
+      add("Address", false, "\"" + base + "\" is not a web address.", "It must look like https://clipcutter-storage.yourname.workers.dev (starts with https://, no spaces).");
+      fatal = true;
+    } else add("Address", true, base);
+    if (!fatal && /^http:/i.test(base) && location.protocol === "https:") { add("https", false, "This page is https, the server address is http.", "Use the https:// address of the server (Cloudflare gives https automatically)."); fatal = true; }
+    if (!fatal) {
+      // Probe 1: does anything answer? (no-cors gives an opaque answer, but a network failure still throws)
+      let reach = false, t0 = performance.now();
+      try { await timed(base + "/api/health", { mode: "no-cors", cache: "no-store" }, 12000); reach = true; add("Reachable", true, "Something answered at that address (" + Math.round(performance.now() - t0) + " ms)."); }
+      catch (e) {
+        add("Reachable", false, e.name === "AbortError" ? "No answer within 12 seconds." : "Nothing answered: " + errText(e),
+          "Check the spelling of the address (a missing or extra letter is the most common cause), your internet, and that the Worker is deployed (Cloudflare dashboard > Workers & Pages > your worker > it must show 'Active').");
+        fatal = true;
+      }
+      if (!fatal) {
+        // Probe 2: can THIS site read the answer?
+        try {
+          const r = await timed(base + "/api/health", { cache: "no-store" }, 12000);
+          let j = null; try { j = await r.json(); } catch (e) { /* not json */ }
+          if (!r.ok && !j) { add("Answer", false, "The address answered " + r.status + " with something that is not ClipCutter.", "That address belongs to a different Worker/site. Deploy the ClipCutter storage server (README in the cloudflare-storage folder) and use its address."); fatal = true; }
+          else { health = j; add("Allowed to talk to it", true, "This site can read the server's answer."); }
+        } catch (e) {
+          add("Allowed to talk to it", false, "The server is there, but the browser blocked this site from reading its answer (CORS).",
+            "On Cloudflare: Worker > Settings > Variables > set ALLOWED_ORIGINS to " + location.origin + " (exactly, no trailing slash) and Deploy. The worker code must also be the ClipCutter one (button 'Copy the server code').");
+          fatal = true;
+        }
+      }
+      if (!fatal) {
+        if (!health || health.app !== "clipcutter-server") { add("Is it ClipCutter?", false, "It answered, but it is not the ClipCutter storage server.", "Use the 'Copy the server code' button, paste it into a NEW Worker (Edit code), deploy, and use that Worker's address."); fatal = true; }
+        else {
+          add("Is it ClipCutter?", true, "Yes - ClipCutter server version " + health.version + (health.storageOnly ? " (storage + profiles)" : "") + ".");
+          if (health.bucketBound === false) add("Storage (R2)", false, "The server has no storage bucket connected.", "Worker > Settings > Bindings > Add > R2 bucket, variable name BUCKET, pick your bucket, Deploy.");
+          else if (health.bucketBound) add("Storage (R2)", true, "A storage bucket is connected.");
+          if (health.tokenSet === false) add("Owner key (TOKEN)", false, "The secret TOKEN is not set, so nobody can log in.", "Worker > Settings > Variables and Secrets > Add > type Secret, name TOKEN, any long password. Remember it: it is also the 'owner key' that creates the admin profile.");
+          else if (health.tokenSet) add("Owner key (TOKEN)", true, "The TOKEN secret is set.");
+          if (health.originAllowed === false) add("Origin list", false, "The server does not list this site (" + (health.originSeen || location.origin) + ") in ALLOWED_ORIGINS.", "Set ALLOWED_ORIGINS to " + location.origin + " and Deploy.");
+          if (health.openSignup === false) add("Sign-up", true, "New profiles are closed (OPEN_SIGNUP=0): only the admin owner key can create them.");
+        }
+      }
+      if (!fatal && extra && extra.user && extra.pin) {
+        // Optional: try the login with what was typed (no change is made).
+        try {
+          const res = await timed(base + "/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: extra.user, pin: extra.pin }) }, 15000);
+          let j = null; try { j = await res.json(); } catch (e) { /* ignore */ }
+          if (res.ok && j && j.token) add("Login test", true, "Login works for " + extra.user + ".");
+          else add("Login test", res.status === 401 || res.status === 404, (j && j.error) || ("server answered " + res.status), res.status === 404 || /no such|not found/i.test((j && j.error) || "") ? "That profile does not exist yet: press 'Create profile'." : res.status === 401 ? "The code is wrong for that profile." : "");
+        } catch (e) { add("Login test", false, errText(e)); }
+      }
+    }
+    const ok = steps.every((x) => x.ok);
+    const lines = ["ClipCutter SERVER REPORT", "Time: " + new Date().toISOString(), "Site: " + location.origin, "Server: " + (base || "(empty)"), "Browser: " + navigator.userAgent, "Result: " + (ok ? "ALL GOOD" : "PROBLEM FOUND") + " (" + Math.round(performance.now() - t00) + " ms)", ""];
+    steps.forEach((x, i) => { lines.push((i + 1) + ". [" + (x.ok ? "OK  " : "FAIL") + "] " + x.name + " - " + x.text); if (!x.ok && x.fix) lines.push("      Fix: " + x.fix); });
+    if (health) lines.push("", "Server answer: " + JSON.stringify(health));
+    return { ok, steps, health, report: lines.join("\n") };
   }
 
   /* ---------- upload ---------- */
@@ -213,8 +280,10 @@ const Cloud = (function () {
   // Log out: tell the server, then forget the server, the session and the user on this device (the data stays on the server).
   async function logout() {
     try { if (enabled()) await call("POST", "/api/logout", { timeout: 8000 }); } catch (e) { /* the session simply expires later */ }
-    cfg = { url: "", backup: "", token: "", auto: false, user: "", role: "" }; store.set(KEY, cfg); active = "";
+    cfg = { url: "", backup: "", token: "", auto: false, user: "", role: "", offload: cfg.offload !== false }; store.set(KEY, cfg); active = "";
   }
+  // Keep the editing state (clips, trim points) on the server too. Best effort.
+  const putProject = (id, obj) => call("PUT", "/api/videos/" + id + "/project", { json: obj, timeout: 20000 });
   const profile = () => ({ user: cfg.user, role: cfg.role, loggedIn: !!(cfg.user && cfg.token) });
   const listMine = () => call("GET", "/api/videos");
   const adminUsers = () => call("GET", "/api/admin/users");
@@ -241,5 +310,5 @@ const Cloud = (function () {
   }
 
   const canRender = () => { try { return store.get("cloudCanRender", true) !== false; } catch (e) { return true; } };
-  return { login, register, logout, profile, listMine, adminUsers, adminVideos, adminPin, adminDelete, delVideoId, delClipId, fetchBlob, putClip, canRender, enabled, getConfig, setConfig, test, upload, submit, jobs, cancelJobs, status, download, remove, flushDeletes, purge, pendingDeletes, CloudError };
+  return { login, register, logout, profile, listMine, adminUsers, adminVideos, adminPin, adminDelete, delVideoId, delClipId, fetchBlob, putClip, canRender, enabled, getConfig, setConfig, test, diagnose, putProject, upload, submit, jobs, cancelJobs, status, download, remove, flushDeletes, purge, pendingDeletes, CloudError };
 })();

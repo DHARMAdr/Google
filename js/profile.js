@@ -121,6 +121,7 @@
       $("pfWho").textContent = "Logged in as " + p.user + (p.role === "admin" ? " (ADMIN - you can see all profiles)" : "") + " on " + Cloud.getConfig().url;
       refreshMine(); if (p.role === "admin") refreshAdmin();
     }
+    if (inn) { $("pfOffload").checked = Cloud.getConfig().offload !== false; }
     refreshHeader();
   }
 
@@ -134,9 +135,9 @@
       if (wasOwner && wasOwner !== r.user && lib.length) clearLocalLibrary();      // another person's files must not show up under this profile
       store.set("libOwner", r.user);
       $("pfPin").value = ""; $("pfKey").value = "";
-      msg(""); showState(); Cloud.flushDeletes();
+      msg(""); showState(); Cloud.flushDeletes(); if (typeof pullFromServer === "function") pullFromServer();
       toast("Welcome, " + r.user + (r.role === "admin" ? " (admin)" : "") + ". New videos are saved to your server automatically.");
-    } catch (e) { msg(errText(e).replace(/^CloudError: /, ""), true); }
+    } catch (e) { msg(errText(e).replace(/^CloudError: /, "") + "\n\nPress \"Server: check / set up\" to find out exactly what is wrong.", true); }
   }
 
   async function doLogout() {
@@ -153,11 +154,44 @@
     toast("Logged out. The server was forgotten on this device.");
   }
 
+
+  /* ---------- SERVER POP-UP ---------- */
+  const sd = $("srvDlg");
+  async function srvCheck() {
+    const url = $("srvUrl").value.trim();
+    $("srvSteps").textContent = "Checking..."; $("srvReport").hidden = true; $("srvCopyReport").hidden = true;
+    let r;
+    try { r = await Cloud.diagnose(url, { user: $("pfUser").value.trim(), pin: /^\d{6}$/.test($("pfPin").value.trim()) ? $("pfPin").value.trim() : "" }); }
+    catch (e) { r = { ok: false, steps: [], report: "The check itself crashed: " + errText(e) }; }
+    const box = $("srvSteps"); box.textContent = "";
+    for (const x of r.steps) {
+      const row = el("div"); row.style.cssText = "margin:4px 0;padding:6px 8px;border-radius:8px;border:1px solid var(--line)";
+      row.appendChild(el("b", (x.ok ? "OK  " : "PROBLEM  ") + x.name)); row.appendChild(el("div", x.text));
+      if (!x.ok && x.fix) { const f = el("div", "How to fix: " + x.fix); f.style.cssText = "margin-top:3px;color:var(--accent,#7cc)"; row.appendChild(f); }
+      box.appendChild(row);
+    }
+    box.appendChild(el("div", r.ok ? "The server is working." : "The server is NOT working yet. Fix the first PROBLEM above, then check again. Press 'Copy server report' to send me the details.", r.ok ? "" : "")).style.fontWeight = "600";
+    $("srvReport").value = r.report; $("srvReport").hidden = r.ok; $("srvCopyReport").hidden = false;
+    if (r.ok && /^https?:/.test(url)) $("pfUrl").value = url;
+    return r;
+  }
+  $("pfServer").addEventListener("click", () => { $("srvUrl").value = $("pfUrl").value.trim() || Cloud.getConfig().url || ""; $("srvOrigin").textContent = location.origin; $("srvSteps").textContent = ""; $("srvReport").hidden = true; $("srvCopyReport").hidden = true; sd.showModal(); });
+  $("srvCheck").addEventListener("click", srvCheck);
+  $("srvUse").addEventListener("click", () => { $("pfUrl").value = $("srvUrl").value.trim(); sd.close(); msg("Server address filled in. Now type your username and code."); });
+  $("srvHow").addEventListener("click", () => { $("srvOrigin").textContent = location.origin; $("srvGuide").hidden = !$("srvGuide").hidden; });
+  $("srvClose").addEventListener("click", () => sd.close());
+  $("srvCopyReport").addEventListener("click", async () => { const t = $("srvReport").value; try { await navigator.clipboard.writeText(t); toast("Server report copied."); } catch (e) { $("srvReport").hidden = false; $("srvReport").select(); toast("Select the text and copy it."); } });
+  $("srvCopyCode").addEventListener("click", async () => {
+    try { const t = await (await fetch("cloudflare-storage/worker.js", { cache: "no-store" })).text(); await navigator.clipboard.writeText(t); toast("Server code copied (" + Math.round(t.length / 1024) + " KB). Paste it into your Cloudflare Worker."); }
+    catch (e) { toast("Could not copy: " + errText(e)); }
+  });
+
   $("profBtn").addEventListener("click", () => { msg(""); showState(); dlg.showModal(); });
   $("pfClose").addEventListener("click", () => dlg.close());
   $("pfLogin").addEventListener("click", () => doSign("login"));
   $("pfReg").addEventListener("click", () => doSign("register"));
   $("pfLogout").addEventListener("click", doLogout);
+  $("pfOffload").addEventListener("change", () => { Cloud.setConfig({ offload: $("pfOffload").checked }); toast($("pfOffload").checked ? "Videos on the server will be removed from this device when not in use." : "Videos stay on this device too."); });
   $("pfRefresh").addEventListener("click", () => { msg(""); showState(); });
   $("pfPin").addEventListener("keydown", (e) => { if (e.key === "Enter") doSign("login"); });
   window.addEventListener("cc-session-expired", () => { refreshHeader(); toast("Your login ran out. Open Profile and enter your code again."); });

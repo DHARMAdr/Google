@@ -434,6 +434,7 @@
     <p class="muted small" style="margin:0 0 8px">Log in to <b>your own</b> storage server (the Cloudflare one from the <b>cloudflare-storage</b> folder). Your videos and finished Shorts are kept on the server under your profile, apart from other people's. When you log out, this page forgets the server and clears its own copy; the data stays safe on the server.</p>
     <label for="pfUrl">Server address (type it every time)</label>
     <input id="pfUrl" type="url" placeholder="https://clipcutter-storage.yourname.workers.dev" autocomplete="off" spellcheck="false">
+    <div class="row" style="margin:4px 0"><button class="ghost small" id="pfServer" type="button">Server: check / set up</button></div>
     <label for="pfUser">Username (3-20 letters, numbers or _)</label>
     <input id="pfUser" type="text" autocomplete="username" spellcheck="false" autocapitalize="none">
     <label for="pfPin">6-digit code</label>
@@ -445,6 +446,7 @@
   </div>
   <div id="pfIn" hidden>
     <div id="pfWho" style="margin-bottom:8px"></div>
+    <label class="small" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="pfOffload" checked> Free this device's space: remove the local copy once the video is safe on the server (it comes back automatically when opened)</label>
     <h4 style="margin:10px 0 4px">My videos on the server</h4>
     <div id="pfMine" class="small"></div>
     <div id="pfAdmin" hidden>
@@ -461,6 +463,28 @@
     <button class="danger" id="pfLogout" hidden>Log out</button>
     <button class="ghost" id="pfClose">Close</button>
   </div>
+</dialog>
+
+<!-- ======================= SERVER DIALOG (filled in by js/profile.js) ======================= -->
+<dialog id="srvDlg">
+  <h3 style="margin:0 0 6px">Your server</h3>
+  <p class="muted small" style="margin:0 0 8px">The server is a small free Cloudflare "storage" of your own. It keeps your videos and Shorts under your profile and gives them back if this device forgets them. Without it everything still works, but only on this device.</p>
+  <label for="srvUrl">Server address</label>
+  <input id="srvUrl" type="url" placeholder="https://clipcutter-storage.yourname.workers.dev" autocomplete="off" spellcheck="false">
+  <div class="row" style="margin-top:8px"><button id="srvCheck">Check server</button><button class="ghost" id="srvUse">Use this address</button></div>
+  <div id="srvSteps" class="small" style="margin:8px 0"></div>
+  <textarea id="srvReport" class="err-text" readonly spellcheck="false" hidden style="min-height:120px"></textarea>
+  <div class="row"><button class="ghost" id="srvCopyReport" hidden>Copy server report</button><button class="ghost" id="srvCopyCode">Copy the server code</button><button class="ghost" id="srvHow">How to make a server</button></div>
+  <ol id="srvGuide" class="small" hidden style="padding-left:18px">
+    <li>Make a free account at <b>dash.cloudflare.com</b>. Open <b>Storage &amp; databases &gt; R2</b> and create a bucket (any name, for example <i>clipcutter</i>).</li>
+    <li>Open <b>Workers &amp; Pages &gt; Create &gt; Worker</b>, name it, press Deploy, then <b>Edit code</b>.</li>
+    <li>Delete the sample code, press <b>Copy the server code</b> here, paste it into the editor, press <b>Deploy</b>.</li>
+    <li><b>Settings &gt; Bindings &gt; Add &gt; R2 bucket</b>: variable name <b>BUCKET</b>, choose your bucket.</li>
+    <li><b>Settings &gt; Variables and Secrets</b>: add a Secret named <b>TOKEN</b> (a long password only you know) and a text variable <b>ALLOWED_ORIGINS</b> = <b id="srvOrigin"></b></li>
+    <li>Deploy again, copy the worker address (ends with .workers.dev), paste it above and press <b>Check server</b>. All lines must say OK.</li>
+    <li>Back in Profile: type a username and a 6-digit code. For the first (admin) profile open "Creating the ADMIN profile" and enter your TOKEN as the owner key.</li>
+  </ol>
+  <div class="row" style="margin-top:8px"><button class="ghost" id="srvClose">Close</button></div>
 </dialog>
 
 <!-- ======================= ERROR REPORT DIALOG (filled in by js/diagnostics.js) ======================= -->
@@ -486,6 +510,7 @@
 <script src="js/cloud.js"></script>
 <script src="js/profiles.js"></script>
 <script src="js/engine.js"></script>
+  <script src="js/autoname.js"></script>
   <script src="js/hunter.js"></script>
 <script src="js/exporter.js"></script>
 <script src="js/app.js"></script>
