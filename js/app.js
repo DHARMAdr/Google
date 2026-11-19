@@ -919,6 +919,12 @@ async function exportClip(v, clip, worker, quiet) {
       if (err.message === "cancelled" || (eCtl && eCtl.cancel)) { clip.status = "Cancelled."; setEStatus("Export cancelled.", 0); updateClipCard(clip); if (barEl) barEl.style.width = "0%"; return false; }
       console.error(err);
       attempts.push({ step: "export", strategy: rcp.name, ok: false, error: errText(err), ms: Math.round(performance.now() - s0) });
+      // A reclaimed / closed / stalled encoder is a hiccup, not a bad setting: try the SAME settings once more (fresh encoder) before simplifying.
+      if (!rcp.again && /Codec reclaimed|closed codec|stalled/i.test(errText(err))) {
+        rcp.again = true; say("The video encoder was interrupted - trying again with the same settings...");
+        try { worker.cancel(); } catch (e) { /* reset the engine */ } eCtl.cancel = false;
+        await new Promise((r) => setTimeout(r, 1500)); k--; continue;
+      }
       if (/NotFoundError|NotReadableError|could not be found/i.test(errText(err))) { k = recipes.length - 1; err = new Error(FILE_GONE + " (" + errText(err) + ")"); }      // retrying with other settings cannot help
       if (k === recipes.length - 1) {
         clip.status = "Failed: " + errText(err); setEStatus("Export failed: " + errText(err) + " - a full report was opened.", 0, true);
@@ -1040,7 +1046,7 @@ async function exportAll() {
   const base = readExport();
   let par = 1;       // ffmpeg engine: several engines at once; turbo: two hardware encoders at once on strong devices; others: one
   if (base.engine === "hq") par = exportWorkers(list.length);
-  else if (base.engine === "turbo" && Exporter.turboAvailable() && !v.noPlay && (navigator.hardwareConcurrency || 4) >= 6 && (navigator.deviceMemory || 4) >= 4) par = Math.min(2, list.length);
+  // NOTE (v5.5.1): turbo exports run ONE AT A TIME. Two hardware encoders + two playing videos made Chrome reclaim an encoder ("Codec reclaimed due to inactivity") and stall for minutes.
   const pool = [Exporter];
   while (pool.length < par) { const w = Exporter.spawn(); allWorkers.push(w); pool.push(w); }
   let done = 0, finished = 0, next = 0;

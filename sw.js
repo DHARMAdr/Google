@@ -16,7 +16,7 @@
    HOW TO IMPROVE:
      - Change CACHE when you want to force everyone to re-download files.
    ===================================================================== */
-const CACHE = "clipcutter-v15";
+const CACHE = "clipcutter-v16";
 const CORE = ["./", "index.html", "css/style.css", "js/diagnostics.js", "js/util.js", "js/compat.js", "js/persist.js", "js/cloud.js", "js/profiles.js", "js/referee.js", "js/engine.js", "vendor/mp4box/mp4box.all.min.js", "js/autoname.js", "js/hunter.js", "js/profile.js", "js/teach.js", "montage.html", "js/montage.js", "js/exporter.js", "js/app.js", "manifest.webmanifest", "icon.svg"];
 
 self.addEventListener("install", (e) => {
