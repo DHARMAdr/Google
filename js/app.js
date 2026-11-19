@@ -672,6 +672,7 @@ function renderClips() {
   if (!cur) return;
   $("noClips").hidden = cur.clips.length > 0;
   $("exportAllBtn").disabled = !cur.clips.length || exporting;
+  if ($("joinBtn")) $("joinBtn").disabled = !cur.clips.length || exporting;
   $("clearClipsBtn").disabled = !cur.clips.length;
   const P = readParams();
 
@@ -828,6 +829,7 @@ function setExporting(on) {
   exporting = on; Compat.keepAwake(on);
   $("cancelBtn").hidden = !on;
   $("exportAllBtn").disabled = on || !(cur && cur.clips.length);
+  if ($("joinBtn")) $("joinBtn").disabled = on || !(cur && cur.clips.length);
   document.querySelectorAll('[data-act="export"]').forEach((b) => (b.disabled = on));
   $("autoBtn").disabled = on || analysing;
 }
@@ -1067,6 +1069,32 @@ async function exportAll() {
 }
 
 $("exportAllBtn").addEventListener("click", exportAll);
+
+/* ONE SHORT WITH ALL KILLS (v5.6): export the clips that are not finished yet, then glue every clip together in the
+   order the kills happened (Exporter.joinClips, no re-encoding). The result gets a download link under the export buttons. */
+async function joinAll() {
+  if (exporting || !cur || !cur.clips.length) return false;
+  const v = cur, list = [...v.clips].sort((a, b) => a.start - b.start);
+  if (list.some((c) => !c.out)) { const n = await exportAll(); if (!n && list.some((c) => !c.out)) return false; }
+  const ready = list.filter((c) => c.out);
+  if (!ready.length) return false;
+  const total = ready.reduce((s, c) => s + (c.end - c.start), 0);
+  try {
+    setEStatus("Joining " + ready.length + " clip(s) into one Short...", 0.5);
+    const blobs = []; for (const c of ready) blobs.push(await (await fetch(c.out.url)).blob());
+    const blob = await Exporter.joinClips(blobs, (t) => setEStatus(t, 0.7));
+    if (v.joined && v.joined.url) URL.revokeObjectURL(v.joined.url);
+    const name = slug(v.name.replace(/\.[^.]+$/, "")) + "_ALL-KILLS.mp4";
+    v.joined = { url: URL.createObjectURL(blob), name, size: blob.size, clips: ready.length };
+    const box = $("joinOut"); box.textContent = "";
+    const a = document.createElement("a"); a.href = v.joined.url; a.download = name; a.textContent = "Download: " + name + " (" + (blob.size / 1048576).toFixed(1) + " MB, about " + fmt(total) + ", " + ready.length + " clip(s))";
+    box.appendChild(a);
+    if (total > 180) box.appendChild(document.createTextNode("  - longer than 3 minutes: too long for a Short. Lower the clip count / length and run it again."));
+    setEStatus("One Short with all your kills is ready.", 1);
+    return true;
+  } catch (err) { setEStatus("Could not join the clips: " + errText(err), 0, true); reportProblem(err, { recovered: false, stage: "join" }); return false; }
+}
+$("joinBtn").addEventListener("click", joinAll);
 $("cancelBtn").addEventListener("click", () => { eCtl.cancel = true; Exporter.cancel(); allWorkers.forEach((w) => { try { w.cancel(); } catch (e) { /* ignore */ } }); });
 
 $("zipBtn").addEventListener("click", async () => {
@@ -1101,6 +1129,7 @@ $("autoBtn").addEventListener("click", async () => {
   setAState("Found " + v.clips.filter((c) => c.auto).length + " highlight(s). Exporting them now...", 1);
   $("sec-clips").scrollIntoView({ behavior: "smooth" });
   const n = await exportAll();
+  if (n && $("autoJoin") && $("autoJoin").checked && n > 1) await joinAll();
   if (n) toast("Done! " + n + " Short(s) ready to download.");
 });
 

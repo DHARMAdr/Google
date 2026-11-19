@@ -280,3 +280,9 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 ### Round 15b - Export "Codec reclaimed due to inactivity" (v5.5.1)
 - Report CC-MWN1A95V (Windows, 44-min 576x360 video): the first export attempt failed after 917 s with QuotaExceededError "Codec reclaimed due to inactivity" / "closed codec" / "playback stalled"; the simpler recipe then worked. Cause: turbo ran TWO hardware encoders and two hidden playing videos at once; Chrome reclaims an idle/starved hardware encoder. (The report also showed version 5.4.1: the user had not yet received 5.5.0 - reload the page twice.)
 - Fix: turbo export is sequential; an encoder-interrupted error retries the SAME settings once (fresh encoder, 1.5 s pause) before falling back to simpler recipes.
+
+### Round 16 - "One Short with ALL my kills" (v5.6.0)
+- User asked for the first-person (main player) kills to be combined into a single Short, and said the output was still wrong.
+- NEW: button "One Short with ALL my kills" (exports clips not yet exported, then joins them in play order) and checkbox "Auto-make also joins ALL my kills into ONE Short" (default on). Code: `Exporter.joinClips` (ffmpeg concat, stream copy, re-encode fallback) + `joinAll()` in app.js; download link appears under the export buttons (#joinOut). Warns when the joined video is longer than 3 minutes.
+- Test (synthetic Valorant-like 320 s video): Auto-make -> 5 clips -> joined 50 s video, link shown, no errors. Joined file not probed with ffprobe (transfer in test harness hung), so playback of the joined file is unverified.
+- Detection accuracy on the user's REAL footage is still unverified (Referee from v5.5.0 fixes lobby clips on synthetic data). Needed: screenshot of kill feed at a kill + short real clip + the report (section 4b).

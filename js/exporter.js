@@ -679,6 +679,33 @@ const Exporter = (function () {
     return new Blob([...parts, ...central, end.buffer], { type: "application/zip" });
   }
 
+  /* ---------- JOIN finished clips into ONE video (v5.6) ----------
+     WHY: "all my kills in a single Short". The clips were all made with the same settings, so ffmpeg can glue
+     them together WITHOUT re-encoding (stream copy: instant, no quality loss). If that fails (settings differ),
+     a slower re-encode is used instead.
+     HOW TO IMPROVE: add a short cross-fade or a flash between kills; add a kill counter on screen.   */
+  async function joinClips(blobs, onStatus) {
+    await loadEngine(onStatus);
+    let list = "";
+    for (let i = 0; i < blobs.length; i++) {
+      const n = "/j" + i + ".mp4";
+      await ff.writeFile(n, new Uint8Array(await blobs[i].arrayBuffer()));
+      list += "file '" + n + "'\n";
+    }
+    await ff.writeFile("/list.txt", list);
+    onStatus && onStatus("Joining " + blobs.length + " clips...");
+    let code = await ff.exec(["-hide_banner", "-f", "concat", "-safe", "0", "-i", "/list.txt", "-c", "copy", "-movflags", "+faststart", "/joined.mp4"]);
+    if (code !== 0) {
+      onStatus && onStatus("Joining again with re-encoding (slower)...");
+      code = await ff.exec(["-hide_banner", "-f", "concat", "-safe", "0", "-i", "/list.txt", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "/joined.mp4"]);
+    }
+    if (code !== 0) throw new Error("ffmpeg could not join the clips (code " + code + ")");
+    const bytes = await ff.readFile("/joined.mp4");
+    for (let i = 0; i < blobs.length; i++) { try { await ff.deleteFile("/j" + i + ".mp4"); } catch (e) { /* ignore */ } }
+    for (const f of ["/list.txt", "/joined.mp4"]) { try { await ff.deleteFile(f); } catch (e) { /* ignore */ } }
+    return new Blob([bytes], { type: "video/mp4" });
+  }
+
   /* ---------- the one function the site calls ---------- */
   async function exportClip(v, clip, o, handlers) {
     const h = handlers || {};
@@ -687,7 +714,7 @@ const Exporter = (function () {
     return exportFF(v, clip, o, h.progress, h.status);
   }
 
-  return { exportClip, cancel, unmountVideo, makeZip, outSize, loadEngine, extractFrames, decodeAudioPCM, getLog, probeInfo, makeProxy, thumbFF, turboAvailable };
+  return { exportClip, joinClips, cancel, unmountVideo, makeZip, outSize, loadEngine, extractFrames, decodeAudioPCM, getLog, probeInfo, makeProxy, thumbFF, turboAvailable };
   }
   const main = make();
   main.spawn = make;
