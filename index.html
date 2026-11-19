@@ -210,6 +210,7 @@
       <button class="auto" id="autoBtn" title="Analyse, pick the best moments and export them all">Auto-make Shorts (everything)</button>
     </div>
     <label class="hint" style="display:block;margin-top:8px"><input type="checkbox" id="autoJoin" checked> Auto-make also joins ALL my kills into ONE Short (in the order they happened)</label>
+    <label class="hint" style="display:block"><input type="checkbox" id="autoReview"> Also include REVIEW moments (could not prove they are my kills) in Auto-make and the joined Short</label>
     <div id="aStatus" class="status"></div>
     <div class="bar"><div id="aBar"></div></div>
     <p class="hint" id="accHint">Changing length, count, lead-in, grouping or sensitivity updates the clips instantly after the first analysis. Changing the video type, detail or the kill-feed box needs a new analysis.</p>
@@ -354,6 +355,7 @@
     <div class="row" style="margin-top:14px">
       <button id="exportAllBtn">Export all clips</button>
       <button class="ghost" id="joinBtn" disabled title="Export every clip and join them all into ONE video, in the order they happened">One Short with ALL my kills</button>
+      <button class="ghost" id="reportBtn" title="Markdown report: approved clips, review list, rejected moments, captions">Clip report (.md)</button>
       <button class="ghost" id="zipBtn" disabled>Download all (ZIP)</button>
       <button class="ghost" id="packBtn" disabled>Copy upload pack (all)</button>
       <button class="ghost" id="cancelBtn" hidden>Cancel export</button>

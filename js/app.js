@@ -535,6 +535,8 @@ function applySuggestions(v) {
   v.clips = v.clips.filter((c) => { if (c.auto) { c.out && URL.revokeObjectURL(c.out.url); return false; } return true; });
   found.forEach((f) => v.clips.push(makeClip(f.start, f.end, {
     auto: true, score: f.score01, conf: f.conf, reason: f.why, kills: f.kills, rank: f.rank, events: f.events,
+    // APPROVED = your name was found on the kill row; REVIEW = clue-only or sound-only guess (check it yourself first).
+    tier: !f.fallback && f.events && f.events.some((e) => e.tier === "approved") ? "approved" : "review",
     label: f.label === "Moment" ? "Moment " + f.rank : f.label
   })));
   sortClips();
@@ -687,6 +689,7 @@ function renderClips() {
           <strong data-role="title">${esc(clip.label)}</strong>
         </div>
         <div class="badges">
+          ${clip.auto ? (clip.tier === "approved" ? `<span class="badge ok">APPROVED - your name</span>` : `<span class="badge hot">REVIEW REQUIRED</span>`) : ""}
           ${clip.kills ? `<span class="badge hot">${clip.kills} kill${clip.kills > 1 ? "s" : ""}</span>` : ""}
           <span class="badge">${esc(clip.reason)}</span>
           <span class="badge ok" data-role="fit"></span>
@@ -1039,9 +1042,13 @@ function exportWorkers(n) {
 }
 const allWorkers = [];                              // every extra export engine we started
 
-async function exportAll() {
+// autoOnly === true (Auto-make / join): skip REVIEW clips unless the "include review" box is ticked. The plain button exports everything.
+let forceReview = false;   // set by Auto-make when NOTHING could be approved, so the user still gets output (clearly marked REVIEW)
+const wantClip = (c, autoOnly) => !autoOnly || c.tier !== "review" || forceReview || ($("autoReview") && $("autoReview").checked);
+async function exportAll(autoOnly) {
   if (exporting || !cur || !cur.clips.length) return 0;
-  const v = cur, list = [...v.clips];
+  const v = cur, list = v.clips.filter((c) => wantClip(c, autoOnly === true));
+  if (!list.length) return 0;
   if (readExport().engine === "cloud" && Cloud.enabled()) return exportCloud(v, list);
   eCtl = { cancel: false };
   setExporting(true);
@@ -1074,8 +1081,9 @@ $("exportAllBtn").addEventListener("click", exportAll);
    order the kills happened (Exporter.joinClips, no re-encoding). The result gets a download link under the export buttons. */
 async function joinAll() {
   if (exporting || !cur || !cur.clips.length) return false;
-  const v = cur, list = [...v.clips].sort((a, b) => a.start - b.start);
-  if (list.some((c) => !c.out)) { const n = await exportAll(); if (!n && list.some((c) => !c.out)) return false; }
+  const v = cur, list = v.clips.filter((c) => wantClip(c, true)).sort((a, b) => a.start - b.start);
+  if (!list.length) { setEStatus("Nothing is APPROVED yet (only REVIEW clips). Check them, or tick 'include REVIEW moments'.", 0, true); return false; }
+  if (list.some((c) => !c.out)) { const n = await exportAll(true); if (!n && list.some((c) => !c.out)) return false; }
   const ready = list.filter((c) => c.out);
   if (!ready.length) return false;
   const total = ready.reduce((s, c) => s + (c.end - c.start), 0);
@@ -1095,6 +1103,30 @@ async function joinAll() {
   } catch (err) { setEStatus("Could not join the clips: " + errText(err), 0, true); reportProblem(err, { recovered: false, stage: "join" }); return false; }
 }
 $("joinBtn").addEventListener("click", joinAll);
+
+/* CLIP REPORT (from the editing spec): a Markdown file with every clip - decision, times, event type, evidence, file name,
+   caption + hashtags - and a separate list of REJECTED moments with the reason. Download it from the button. */
+function clipReportText(v) {
+  const hms = (t) => { t = Math.max(0, Math.round(t)); return String(Math.floor(t / 3600)).padStart(2, "0") + ":" + String(Math.floor(t / 60) % 60).padStart(2, "0") + ":" + String(t % 60).padStart(2, "0"); };
+  const tags = /pubg/i.test(readParams().profile || "") ? "#PUBG #PUBGMobile #PUBGClips #GamingReels" : "#Valorant #ValorantClips #GamingReels #FPSGaming";
+  const sorted = [...v.clips].sort((a, b) => a.start - b.start), L = [];
+  L.push("# ClipCutter clip report", "", "Video: " + v.name + "  |  App " + (window.Diag && Diag.APP_VERSION || ""), "");
+  L.push("## Approved (your name matched on the kill row)", "", "| Clip | Start | End | Length | Event | Evidence | File | Caption |", "|---|---|---|---|---|---|---|---|");
+  const row = (c, i) => "| " + String(i + 1).padStart(3, "0") + " | " + hms(c.start) + " | " + hms(c.end) + " | " + Math.round(c.end - c.start) + " s | " + (c.label || "") + " | " + String(c.reason || "").replace(/\|/g, "/") + " | " + clipFileName(v, c, "mp4") + " | " + (c.kills > 1 ? c.label : "Clean kill") + " by the main player. " + tags + " |";
+  sorted.filter((c) => c.tier === "approved" || !c.auto).forEach((c, i) => L.push(row(c, i)));
+  L.push("", "## REVIEW_REQUIRED (could not prove it is your kill - check by eye)", "", "| Clip | Start | End | Length | Event | Why uncertain | File | Caption |", "|---|---|---|---|---|---|---|---|");
+  sorted.filter((c) => c.auto && c.tier === "review").forEach((c, i) => L.push(row(c, i)));
+  const rej = (v.an && v.an.decisions || []).filter((d) => !d.ok);
+  L.push("", "## Rejected / excluded moments (" + rej.length + ")", "");
+  rej.slice(0, 200).forEach((d) => L.push("- " + hms(d.t) + " (" + d.t.toFixed(1) + " s): " + d.why));
+  L.push("", "## Summary", "", "- Approved: " + sorted.filter((c) => c.tier === "approved" || !c.auto).length, "- Review required: " + sorted.filter((c) => c.auto && c.tier === "review").length, "- Rejected: " + rej.length);
+  return L.join("\n");
+}
+$("reportBtn").addEventListener("click", () => {
+  if (!cur || !cur.clips.length) { toast("Find highlights first.", true); return; }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([clipReportText(cur)], { type: "text/markdown" })); a.download = slug(cur.name.replace(/\.[^.]+$/, "")) + "_clip-report.md";
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+});
 $("cancelBtn").addEventListener("click", () => { eCtl.cancel = true; Exporter.cancel(); allWorkers.forEach((w) => { try { w.cancel(); } catch (e) { /* ignore */ } }); });
 
 $("zipBtn").addEventListener("click", async () => {
@@ -1128,8 +1160,12 @@ $("autoBtn").addEventListener("click", async () => {
   if (!v.clips.length) { setAState("No highlights found, so nothing to export. Try another video type or a higher sensitivity.", 1, true); return; }
   setAState("Found " + v.clips.filter((c) => c.auto).length + " highlight(s). Exporting them now...", 1);
   $("sec-clips").scrollIntoView({ behavior: "smooth" });
-  const n = await exportAll();
+  forceReview = !v.clips.some((c) => c.tier === "approved");
+  if (forceReview) setAState("Your name could not be proven on any kill row, so every moment is marked REVIEW REQUIRED. Exporting them anyway - please check each one before posting.", 1);
+  let n = 0; try { n = await exportAll(true); } finally { /* keep forceReview until the join below */ }
+  if (!n) { forceReview = false; setAState("Nothing was exported. Check the clips below.", 1, true); return; }
   if (n && $("autoJoin") && $("autoJoin").checked && n > 1) await joinAll();
+  forceReview = false;
   if (n) toast("Done! " + n + " Short(s) ready to download.");
 });
 

@@ -1337,8 +1337,9 @@ const Engine = (function () {
       const kills = evs.filter((e) => e.kind === "kill").length;
       const score = w.scenes.reduce((s, x) => s + x.score, 0);
       const label = kills >= 5 ? "Multi-kill x" + kills : kills === 4 ? "Quad kill" : kills === 3 ? "Triple kill" : kills === 2 ? "Double kill" : kills === 1 ? "Kill" : "Intense moment";
-      const why = kills ? kills + " kill(s): kill-feed/hit activity" + (an.audioOk ? " + gunfire sound" : "") : "High sound + action energy";
-      return { start, end, score, conf: Math.max(...evs.map((e) => e.conf)), kills, label, why, events: evs.map((e) => ({ t: e.t, conf: e.conf, kind: e.kind })) };
+      const named = evs.some((e) => e.tier === "approved");
+      const why = kills ? kills + " kill(s): " + (named ? "YOUR name on the kill row" : "kill-feed/hit activity (name not proven)") + (an.audioOk ? " + gunfire sound" : "") : "High sound + action energy";
+      return { start, end, score, conf: Math.max(...evs.map((e) => e.conf)), kills, label, why, events: evs.map((e) => ({ t: e.t, conf: e.conf, kind: e.kind, tier: e.tier, why: e.why })) };
     });
 
     // 4) rank, remove overlaps with better clips, keep the best N

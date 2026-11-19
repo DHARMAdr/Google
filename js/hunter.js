@@ -97,15 +97,19 @@ const Hunter = (function () {
       const conf = Math.min(1, 0.7 + Math.min(0.2, (M[j] - 0.55) * 0.5) + (gun.n >= 2 ? 0.1 : 0));
       events.push({ t, conf, kind: "kill", why: "your name appeared in the kill feed (match " + M[j].toFixed(2) + (gun.n ? ", " + gun.n + " shot(s) before" : "") + ")" });
     }
-    return finish(an, params, events, stats);
+    return finish(an, params, events, stats, true);
   }
 
   // Shared ending: drop doubles, group into streaks, build the picture line.
-  function finish(an, params, events, stats) {
+  /* EVIDENCE TIERS (v5.7, from the editing spec): a kill is APPROVED only when your NAME was found on the kill-feed row (taught or
+     automatic) - that is the proof it is the main player's kill. Kills found by clues only (sound + hit marker + banner) cannot be
+     attributed to you, so they are REVIEW REQUIRED, never silently approved. Lobby / death / teammate rows are REJECTED. */
+  function finish(an, params, events, stats, named) {
     const prof = PROFILES[params.profile] || PROFILES.shooter_tr, N = an.N;
     events.sort((a, b) => a.t - b.t);
     // REFEREE: a kill must happen inside a real firefight (not in the lobby / buy phase).
     if (typeof Referee !== "undefined") { const r = Referee.judge(an, events); for (const k in r) stats.reasons[k] = (stats.reasons[k] || 0) + r[k]; }
+    events.forEach((e) => { e.tier = e.kind !== "kill" ? "rejected" : named ? "approved" : "review"; });
     const kept = [];
     for (const e of events) {
       const last = kept[kept.length - 1];
@@ -123,6 +127,7 @@ const Hunter = (function () {
       s.kills = s.events.length; s.first = s.events[0].t; s.last = s.events[s.events.length - 1].t;
       s.score = s.events.reduce((sum, e, idx) => sum + e.conf * (1 + 0.4 * idx), 0);
       s.conf = Math.max(...s.events.map((e) => e.conf));
+      s.tier = s.events.some((e) => e.tier === "approved") ? "approved" : "review";
       const n = s.kills;
       s.label = n >= 5 ? "Multi-kill x" + n : n === 4 ? "Quad kill" : n === 3 ? "Triple kill" : n === 2 ? "Double kill" : "Kill";
     });
@@ -137,7 +142,7 @@ const Hunter = (function () {
   function detect(an, params) {
     if (an.hasTemplate && an.ch.mine) return detectByName(an, params);
     // AUTOMATIC NAME (js/autoname.js): the name was found by itself, so use the rows it matched.
-    if (an.auto && an.auto.ok) { const r = finish(an, params, an.auto.events, Object.assign({ candidates: an.auto.events.length, reasons: {} }, an.auto.stats)); return r; }
+    if (an.auto && an.auto.ok) { const r = finish(an, params, an.auto.events, Object.assign({ candidates: an.auto.events.length, reasons: {} }, an.auto.stats), true); return r; }
     const sens = params.sens || 1;
     const prof = PROFILES[params.profile] || PROFILES.shooter_tr;
     const { N, ch } = an;
