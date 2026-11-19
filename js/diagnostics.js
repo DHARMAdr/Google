@@ -40,7 +40,7 @@
 const Diag = (function () {
   "use strict";
 
-  const APP_VERSION = "5.4.1";
+  const APP_VERSION = "5.5.0";
   const START = Date.now();
   const logs = [];            // recent console lines
   const crumbs = [];          // recent clicks and stage changes
@@ -284,6 +284,17 @@ const Diag = (function () {
       entry.attempts.forEach((a, i) => L.push((i + 1) + ". " + a.step + " / " + a.strategy + " -> " + (a.ok ? "WORKED" : "FAILED") + (a.error ? " (" + a.error + ")" : "") + (a.ms !== undefined ? " [" + a.ms + " ms]" : "")));
     } else L.push("- none recorded");
     L.push("");
+    // Detection decision log (Referee): every candidate kill with accept / reject and WHY.
+    try {
+      const an = typeof cur !== "undefined" && cur && cur.an;
+      if (an && an.decisions) {
+        L.push("## 4b. Detection decisions (Referee)");
+        L.push("- music beats ignored: " + ((an.audioMusic && an.audioMusic.beats) || 0) + " over " + Math.round((an.audioMusic && an.audioMusic.sec) || 0) + " s; real shots counted: " + (an._shots ? an._shots.length : "?"));
+        if (an.auto) L.push("- auto-name: " + (an.auto.ok ? "found " + JSON.stringify(an.auto.stats && an.auto.stats.learned) : "not found - " + an.auto.reason));
+        L.push("```\n" + (an.decisions.slice(0, 60).map((d) => d.t.toFixed(1) + "s " + (d.ok ? "KILL " : "no   ") + d.why).join("\n") || "none") + "\n```");
+        L.push("");
+      }
+    } catch (e) { /* the report must never fail because of this */ }
     L.push("## 5. Likely cause (automatic guesses)");
     diagnose(entry, probes, ctx).forEach((t) => L.push("- " + t));
     L.push("");

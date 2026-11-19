@@ -115,8 +115,10 @@ const AutoName = (function () {
       for (let k = Math.max(0, Math.round((t - 0.3) / DT)); k <= Math.min(an.N - 1, Math.round((t + 2.5) / DT)); k++) if (an.ch.cut[k] > 0) return true;
       return false;
     };
-    rows.forEach((r) => { r.gun = an.audioOk ? gunBefore(onsets, r.t + 0.2) : 0; r.death = cutAt(r.t); });
-    const alive = rows.filter((r) => !r.death);
+    rows.forEach((r) => { r.gun = an.audioOk ? gunBefore(onsets, r.t + 0.2) : 0; r.death = cutAt(r.t); r.live = typeof Referee === "undefined" || Referee.live(an, r.t); });
+    // Rows outside a live firefight (lobby / buy phase: blinking name lists, menus) are never used to learn or to count kills.
+    const alive = rows.filter((r) => !r.death && r.live);
+    stats.liveRows = alive.length; stats.offRows = rows.filter((r) => !r.live).length;
     const gunRows = alive.filter((r) => r.gun >= 2);
     const baseRate = alive.length ? gunRows.length / alive.length : 0;
     if (gunRows.length < 3) return { ok: false, reason: "fewer than 3 kill-feed rows came right after your own gunfire", stats };
@@ -179,6 +181,7 @@ const AutoName = (function () {
     const events = [];
     for (const r of rows) {
       if (bestMatch(best.C, r, 0.95) < MATCH) continue;
+      if (!r.live) { events.push({ t: r.t, conf: 0.15, kind: "feed", why: "rejected: your name but no firefight around (lobby / buy phase)" }); stats.reasons["no firefight around (lobby / buy phase / menu)"] = (stats.reasons["no firefight around (lobby / buy phase / menu)"] || 0) + 1; continue; }
       if (r.death) { events.push({ t: r.t, conf: 0.2, kind: "feed", why: "rejected: the view switched right after (probably your own death)" }); stats.reasons["your own death (view switch)"] = (stats.reasons["your own death (view switch)"] || 0) + 1; continue; }
       if (r.gun < 1 && best.ratio < 0.9) { events.push({ t: r.t, conf: 0.2, kind: "feed", why: "rejected: your name but no gunfire before" }); stats.reasons["no gunfire before"] = (stats.reasons["no gunfire before"] || 0) + 1; continue; }
       events.push({ t: r.t, conf: Math.min(1, 0.65 + 0.1 * Math.min(2, r.gun) + 0.15 * best.ratio), kind: "kill", why: "your name was found automatically in the kill feed (" + best.nGun + " matching rows, " + Math.round(best.ratio * 100) + "% after your gunfire)" });

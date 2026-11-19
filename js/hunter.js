@@ -104,6 +104,8 @@ const Hunter = (function () {
   function finish(an, params, events, stats) {
     const prof = PROFILES[params.profile] || PROFILES.shooter_tr, N = an.N;
     events.sort((a, b) => a.t - b.t);
+    // REFEREE: a kill must happen inside a real firefight (not in the lobby / buy phase).
+    if (typeof Referee !== "undefined") { const r = Referee.judge(an, events); for (const k in r) stats.reasons[k] = (stats.reasons[k] || 0) + r[k]; }
     const kept = [];
     for (const e of events) {
       const last = kept[kept.length - 1];
@@ -191,37 +193,7 @@ const Hunter = (function () {
       }
     }
 
-    // One kill per 0.9 s at most (keep the stronger).
-    events.sort((a, b) => a.t - b.t);
-    const kept = [];
-    for (const e of events) {
-      const last = kept[kept.length - 1];
-      if (last && e.t - last.t < 0.9) { if (e.kind === "kill" && (last.kind !== "kill" || e.conf > last.conf)) kept[kept.length - 1] = e; }
-      else kept.push(e);
-    }
-
-    // ---- 3) STREAKS: kills closer than "gap" seconds belong together ----
-    const gap = params.gap || prof.gap || 7;
-    const scenes = [];
-    let curS = null;
-    for (const e of kept) {
-      if (e.kind !== "kill") continue;
-      if (curS && e.t - curS.events[curS.events.length - 1].t <= gap) curS.events.push(e);
-      else { curS = { events: [e] }; scenes.push(curS); }
-    }
-    scenes.forEach((s) => {
-      s.kills = s.events.length; s.first = s.events[0].t; s.last = s.events[s.events.length - 1].t;
-      s.score = s.events.reduce((sum, e, idx) => sum + e.conf * (1 + 0.4 * idx), 0);
-      s.conf = Math.max(...s.events.map((e) => e.conf));
-      const n = s.kills;
-      s.label = n >= 5 ? "Multi-kill x" + n : n === 4 ? "Quad kill" : n === 3 ? "Triple kill" : n === 2 ? "Double kill" : "Kill";
-    });
-
-    // A simple line for the timeline picture: height = how sure we are around each kill.
-    const E = new Float32Array(N);
-    kept.forEach((e) => { if (e.kind === "kill") { const j = Math.min(N - 1, Math.round(e.t / DT)); for (let k = Math.max(0, j - 5); k <= Math.min(N - 1, j + 5); k++) E[k] = Math.max(E[k], e.conf); } });
-    stats.kills = scenes.reduce((n, s) => n + s.kills, 0);
-    return { events: kept, scenes, E, stats };
+    return finish(an, params, events, stats);
   }
 
   return { detect };

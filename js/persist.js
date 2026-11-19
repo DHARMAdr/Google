@@ -17,12 +17,15 @@
 
 const Persist = (function () {
   "use strict";
-  const DB = "clipcutter", STORE = "videos", EXP = "clipcutter-exports";
+  const DB = "clipcutter", STORE = "videos", CACHE = "cache", EXP = "clipcutter-exports";
 
   function open() {
     return new Promise((res, rej) => {
-      const r = indexedDB.open(DB, 1);
-      r.onupgradeneeded = () => r.result.createObjectStore(STORE, { keyPath: "key" });
+      const r = indexedDB.open(DB, 2);      // version 2 added the "cache" store (analysis results kept between visits)
+      r.onupgradeneeded = () => {
+        if (!r.result.objectStoreNames.contains(STORE)) r.result.createObjectStore(STORE, { keyPath: "key" });
+        if (!r.result.objectStoreNames.contains(CACHE)) r.result.createObjectStore(CACHE, { keyPath: "key" });
+      };
       r.onsuccess = () => res(r.result);
       r.onerror = () => rej(r.error);
     });
@@ -34,6 +37,29 @@ const Persist = (function () {
       t.oncomplete = () => { db.close(); res(req && req.result); };
       t.onerror = () => { db.close(); rej(t.error); };
     });
+  }
+  // The CACHE store holds results that are expensive to make (sound features, picture scans) so a retry, a reload
+  // or a crash does not start from zero. Each entry: { key, at, val }. Everything here is best effort and never throws.
+  async function cacheRun(mode, fn) {
+    const db = await open();
+    return new Promise((res, rej) => {
+      const t = db.transaction(CACHE, mode), req = fn(t.objectStore(CACHE));
+      t.oncomplete = () => { db.close(); res(req && req.result); };
+      t.onerror = () => { db.close(); rej(t.error); };
+      t.onabort = () => { db.close(); rej(t.error || new Error("cache write aborted")); };
+    });
+  }
+  const cacheGet = (key) => cacheRun("readonly", (s) => s.get(key)).then((r) => (r ? r.val : null)).catch(() => null);
+  const cachePut = (key, val) => cacheRun("readwrite", (s) => s.put({ key, at: Date.now(), val })).then(() => true).catch(() => false);
+  const cacheDel = (key) => cacheRun("readwrite", (s) => s.delete(key)).catch(() => {});
+  const cacheKeys = () => cacheRun("readonly", (s) => s.getAllKeys()).catch(() => []);
+  async function cacheClear() { try { await cacheRun("readwrite", (s) => s.clear()); } catch (e) { /* ignore */ } }
+  // Remove entries older than 'days' days (called once at start-up).
+  async function cacheTidy(days) {
+    try {
+      const old = await cacheRun("readonly", (s) => s.getAll());
+      for (const r of old || []) if (Date.now() - r.at > days * 864e5) await cacheDel(r.key);
+    } catch (e) { /* ignore */ }
   }
   const put = (rec) => run("readwrite", (s) => s.put(rec));
   const del = (key) => run("readwrite", (s) => s.delete(key));
@@ -50,5 +76,5 @@ const Persist = (function () {
     try { const d = await expDir(); for await (const [n] of d.entries()) { const made = parseInt(n.slice(0, 8), 36) || 0; if (!keep.includes(n) && Date.now() - made > 600e3) await d.removeEntry(n).catch(() => {}); } } catch (e) { /* ignore */ }
   }
 
-  return { put, del, all, saveExport, loadExport, delExport, cleanExports };
+  return { cacheGet, cachePut, cacheDel, cacheKeys, cacheClear, cacheTidy, put, del, all, saveExport, loadExport, delExport, cleanExports };
 })();

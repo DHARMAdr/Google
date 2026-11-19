@@ -116,8 +116,25 @@ const Engine = (function () {
      =============================================================== */
   // Get the sound as numbers. Plan A: the browser's decoder. Plan B (self-healing): ffmpeg decodes it,
   // which also handles audio codecs the browser does not know (AC-3, DTS...).
-  async function decodeAudio(v, rec, progress) {
+  // A short text that identifies THIS file (so cached results are only reused for the same video).
+  function fingerprint(v) {
+    try { if (!v.file || !v.file.size) return ""; return [v.name, v.file.size, v.origModified || v.file.lastModified || 0, (v.duration || 0).toFixed(1)].join("|"); } catch (e) { return ""; }
+  }
+  async function decodeAudio(v, rec, progress, ctl) {
     const file = v.file;
+    // 1) the FAST way (AudioDecoder + mp4 index); 2) the browser's decodeAudioData; 3) ffmpeg.
+    {
+      const s0 = performance.now();
+      try {
+        const r = await decodeAudioFast(v, rec, (f) => progress && progress(f), ctl);
+        rec.attempts.push({ step: "audio", strategy: "fast audio decoder", ok: true, ms: Math.round(performance.now() - s0) });
+        return r;
+      } catch (e) {
+        if (e && e.message === CANCEL) throw e;
+        rec.attempts.push({ step: "audio", strategy: "fast audio decoder", ok: false, error: errText(e), ms: Math.round(performance.now() - s0) });
+        console.warn("Fast audio decoder not used:", e);
+      }
+    }
     const Ctx = window.AudioContext || window.webkitAudioContext;
     const s0 = performance.now();
     try {
@@ -141,7 +158,7 @@ const Engine = (function () {
 
   async function audioScan(v, ctl, progress, rec) {
     stageMark("analyse:audio", "decoding");
-    const buf = await decodeAudio(v, rec, progress);
+    const buf = await decodeAudio(v, rec, progress, ctl);
 
     const sr = buf.sampleRate;
     const c0 = buf.getChannelData(0), c1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
@@ -207,7 +224,8 @@ const Engine = (function () {
         out.push({ t: i * dtF + 0.016, s: clamp((v - base) / (base + med + 1e-6), 0, 8) });
       }
     }
-    return out;
+    // REFEREE: throw away steady music-like beats (lobby / buy phase music) so they never look like gunfire.
+    return typeof Referee !== "undefined" ? Referee.cleanOnsets(out) : out;
   }
 
   /* ---------------------------------------------------------------
@@ -220,16 +238,19 @@ const Engine = (function () {
   function audioWindows(au, dur, before, after) {
     const all = pickOnsets(au);
     if (all.length < 3) return null;
-    // Real games have gunfire almost everywhere. Keep only the strongest shots (and narrower windows) until at most ~55% of the video is watched.
-    for (const [minS, bef, aft] of [[1.0, before, after], [2.0, before, after], [3.0, before * 0.8, after * 0.8], [4.0, before * 0.65, after * 0.7], [5.0, before * 0.55, after * 0.6]]) {
-      const win = [];
-      for (const o of all) {
-        if (o.s < minS) continue;
-        const a = Math.max(0, o.t - bef), b = Math.min(dur, o.t + aft), last = win[win.length - 1];
-        if (last && a <= last[1] + 0.5) last[1] = Math.max(last[1], b); else win.push([a, b]);
+    // Real games have gunfire almost everywhere. Keep only the strongest shots (and narrower windows) until
+    // at most ~30% of the video is watched (fast); if that is impossible accept up to ~55%.
+    for (const cap of [0.30, 0.55]) {
+      for (const [minS, bef, aft] of [[1.0, before, after], [2.0, before, after], [3.0, before * 0.8, after * 0.8], [4.0, before * 0.65, after * 0.7], [5.0, before * 0.55, after * 0.6], [6.5, before * 0.5, after * 0.55]]) {
+        const win = [];
+        for (const o of all) {
+          if (o.s < minS) continue;
+          const a = Math.max(0, o.t - bef), b = Math.min(dur, o.t + aft), last = win[win.length - 1];
+          if (last && a <= last[1] + 0.5) { last[1] = Math.max(last[1], b); last[2] += o.s; } else win.push([a, b, o.s]);   // [from, to, strength]
+        }
+        const covered = win.reduce((s, w) => s + (w[1] - w[0]), 0);
+        if (win.length && covered <= dur * cap) return win;
       }
-      const covered = win.reduce((s, w) => s + (w[1] - w[0]), 0);
-      if (win.length && covered <= dur * 0.55) return win;
     }
     return null;                                              // even the strongest shots cover too much: watch everything
   }
@@ -278,23 +299,26 @@ const Engine = (function () {
 
   // Copies the current picture of a <video> into numbers (the whole frame, plus each small box at full detail).
   function makePixelReader(geom) {
-    const cv = document.createElement("canvas"); cv.width = geom.W; cv.height = geom.H;
+    // ONE canvas holds the whole picture AND every region (stacked below each other) so the slow
+    // "read pixels back from the graphics chip" step happens ONCE per sample instead of 4 times (about 2x faster on phones).
+    const names = Object.keys(geom.regs);
+    let CW = geom.W, CH = geom.H; const ys = {};
+    names.forEach((k) => { ys[k] = CH; CH += geom.regs[k].h; CW = Math.max(CW, geom.regs[k].w); });
+    const cv = document.createElement("canvas"); cv.width = CW; cv.height = CH;
     const g = cv.getContext("2d", { willReadFrequently: true });
-    const rg = {};
-    Object.keys(geom.regs).forEach((k) => {
-      const R = geom.regs[k], c = document.createElement("canvas"); c.width = R.w; c.height = R.h;
-      rg[k] = c.getContext("2d", { willReadFrequently: true });
-    });
     return function read(vid) {
-      const sw = vid.videoWidth || vid.displayWidth, sh = vid.videoHeight || vid.displayHeight;      // a <video> or a decoded VideoFrame
+      const sw = vid.videoWidth || vid.displayWidth || vid.width, sh = vid.videoHeight || vid.displayHeight || vid.height;      // a <video>, a decoded VideoFrame or an ImageBitmap
       g.drawImage(vid, 0, 0, geom.W, geom.H);
-      const px = g.getImageData(0, 0, geom.W, geom.H).data;            // <-- a tainted canvas throws HERE
-      const rp = {};
-      for (const k of Object.keys(geom.regs)) {
-        const R = geom.regs[k], r = R.r;
-        rg[k].drawImage(vid, r.x * sw, r.y * sh, r.w * sw, r.h * sh, 0, 0, R.w, R.h);
-        rp[k] = rg[k].getImageData(0, 0, R.w, R.h).data;
-      }
+      for (const k of names) { const R = geom.regs[k], r = R.r; g.drawImage(vid, r.x * sw, r.y * sh, r.w * sw, r.h * sh, 0, ys[k], R.w, R.h); }
+      const all = g.getImageData(0, 0, CW, CH).data;                    // <-- a tainted canvas throws HERE
+      const cut = (x, y, w, h) => {                                       // copy one area out of the big picture
+        if (w === CW) return all.slice(y * CW * 4, (y + h) * CW * 4);
+        const o = new Uint8ClampedArray(w * h * 4);
+        for (let r = 0; r < h; r++) o.set(all.subarray(((y + r) * CW) * 4, ((y + r) * CW + w) * 4), r * w * 4);
+        return o;
+      };
+      const px = cut(0, 0, geom.W, geom.H), rp = {};
+      for (const k of names) rp[k] = cut(0, ys[k], geom.regs[k].w, geom.regs[k].h);
       return { px, rp };
     };
   }
@@ -420,9 +444,11 @@ const Engine = (function () {
      (a decoder stops when too many frames stay open).
      HOW TO IMPROVE: skip decoding of non-reference frames, use several decoders for long videos,
      support WebM/VP9 by reading the index with another small library.                              */
-  function loadMp4Info(v) {
-    if (v._dec) return v._dec;
-    v._dec = (async () => {
+  // Read the MP4 index ONCE per video (cached on the video). It tells where every compressed picture / sound chunk
+  // lives in the file. Result: { video: {...}|null, videoErr, audio: {...}|null, audioErr }.
+  function parseMp4(v) {
+    if (v._mp4) return v._mp4;
+    v._mp4 = (async () => {
       if (typeof MP4Box === "undefined") throw new Error("the mp4box library is not loaded");
       const file = v.file, mp4 = MP4Box.createFile();
       let info = null, err = null;
@@ -435,29 +461,108 @@ const Engine = (function () {
         pos = (typeof next === "number" && next > pos) ? next : pos + ab.byteLength;       // the library tells where the index (moov) continues, even at the end of the file
       }
       if (!info) throw new Error("could not read the MP4 index" + (err ? ": " + err : ""));
-      const vt = info.videoTracks && info.videoTracks[0];
-      if (!vt) throw new Error("no video track in the MP4 index");
-      if (v.w && v.h && (Math.abs(vt.video.width - v.w) > 2 || Math.abs(vt.video.height - v.h) > 2)) throw new Error("the picture is rotated/scaled in the file (" + vt.video.width + "x" + vt.video.height + " vs " + v.w + "x" + v.h + ")");
-      const trak = mp4.getTrackById(vt.id), samples = trak.samples;
-      if (!samples || !samples.length) throw new Error("the MP4 index has no sample list");
-      const entry = trak.mdia.minf.stbl.stsd.entries[0], box = entry.avcC || entry.hvcC;
-      let description;
-      if (box) { const DS = (typeof DataStream !== "undefined") ? DataStream : MP4Box.DataStream, ds = new DS(undefined, 0, DS.BIG_ENDIAN); box.write(ds); description = new Uint8Array(ds.buffer, 8); }
-      else if (!/^(vp0?9|av01)/.test(vt.codec)) throw new Error("unknown video codec " + vt.codec);
-      const config = { codec: vt.codec, codedWidth: vt.video.width, codedHeight: vt.video.height, hardwareAcceleration: "prefer-hardware" };
-      if (description) config.description = description;
-      let sup = await VideoDecoder.isConfigSupported(config);
-      if (!sup.supported) { delete config.hardwareAcceleration; sup = await VideoDecoder.isConfigSupported(config); }
-      if (!sup.supported) throw new Error("this device cannot decode " + vt.codec);
-      const n = samples.length, cts = new Float64Array(n), dur = new Float64Array(n), off = new Float64Array(n), size = new Uint32Array(n), sync = new Uint8Array(n);
-      for (let k = 0; k < n; k++) { const sm = samples[k]; cts[k] = sm.cts / sm.timescale; dur[k] = sm.duration / sm.timescale; off[k] = sm.offset; size[k] = sm.size; sync[k] = sm.is_sync ? 1 : 0; }
-      return { n, cts, dur, off, size, sync, config, codec: vt.codec };
+      const res = { video: null, videoErr: "", audio: null, audioErr: "" };
+      const table = (trak) => {
+        const samples = trak.samples;
+        if (!samples || !samples.length) throw new Error("the MP4 index has no sample list");
+        const n = samples.length, cts = new Float64Array(n), dur = new Float64Array(n), off = new Float64Array(n), size = new Uint32Array(n), sync = new Uint8Array(n);
+        for (let k = 0; k < n; k++) { const sm = samples[k]; cts[k] = sm.cts / sm.timescale; dur[k] = sm.duration / sm.timescale; off[k] = sm.offset; size[k] = sm.size; sync[k] = sm.is_sync ? 1 : 0; }
+        return { n, cts, dur, off, size, sync };
+      };
+      try {                                                                                  // ---- video ----
+        const vt = info.videoTracks && info.videoTracks[0];
+        if (!vt) throw new Error("no video track in the MP4 index");
+        if (v.w && v.h && (Math.abs(vt.video.width - v.w) > 2 || Math.abs(vt.video.height - v.h) > 2)) throw new Error("the picture is rotated/scaled in the file (" + vt.video.width + "x" + vt.video.height + " vs " + v.w + "x" + v.h + ")");
+        const trak = mp4.getTrackById(vt.id), entry = trak.mdia.minf.stbl.stsd.entries[0], box = entry.avcC || entry.hvcC;
+        let description;
+        if (box) { const DS = (typeof DataStream !== "undefined") ? DataStream : MP4Box.DataStream, ds = new DS(undefined, 0, DS.BIG_ENDIAN); box.write(ds); description = new Uint8Array(ds.buffer, 8); }
+        else if (!/^(vp0?9|av01)/.test(vt.codec)) throw new Error("unknown video codec " + vt.codec);
+        const config = { codec: vt.codec, codedWidth: vt.video.width, codedHeight: vt.video.height, hardwareAcceleration: "prefer-hardware" };
+        if (description) config.description = description;
+        let sup = await VideoDecoder.isConfigSupported(config);
+        if (!sup.supported) { delete config.hardwareAcceleration; sup = await VideoDecoder.isConfigSupported(config); }
+        if (!sup.supported) throw new Error("this device cannot decode " + vt.codec);
+        res.video = Object.assign(table(trak), { config, codec: vt.codec });
+      } catch (e) { res.videoErr = errText(e); }
+      try {                                                                                  // ---- audio ----
+        const at = info.audioTracks && info.audioTracks[0];
+        if (!at) throw new Error("no audio track in the MP4 index");
+        const trak = mp4.getTrackById(at.id), entry = trak.mdia.minf.stbl.stsd.entries[0];
+        let description;
+        try { const d = entry.esds.esd.descs[0].descs[0].data; if (d) description = new Uint8Array(d); } catch (e) { /* some codecs have none */ }
+        const config = { codec: at.codec, sampleRate: at.audio.sample_rate, numberOfChannels: at.audio.channel_count };
+        if (description) config.description = description;
+        if (typeof AudioDecoder === "undefined") throw new Error("this browser has no AudioDecoder");
+        const sup = await AudioDecoder.isConfigSupported(config);
+        if (!sup.supported) throw new Error("this device cannot decode audio " + at.codec);
+        res.audio = Object.assign(table(trak), { config, codec: at.codec });
+      } catch (e) { res.audioErr = errText(e); }
+      return res;
     })();
-    v._dec.catch(() => { v._dec = null; });
-    return v._dec;
+    v._mp4.catch(() => { v._mp4 = null; });
+    return v._mp4;
+  }
+  async function loadMp4Info(v) {
+    const r = await parseMp4(v);
+    if (!r.video) throw new Error(r.videoErr || "no usable video track");
+    return r.video;
   }
 
-  function makeDecoderSource(v, geom, fps) {
+  /* ---------------------------------------------------------------
+     FAST AUDIO (v5.5): decode the sound with the AudioDecoder instead of decodeAudioData.
+     WHY: decodeAudioData needs the WHOLE 230 MB file in memory and decodes it to stereo floats first; on the
+     phone that step alone took about 10 minutes for a 36-minute video. Here the sound chunks are read from the
+     file in 6 MB blocks, decoded, mixed to mono and shrunk to 16 kHz on the fly (one small Float32Array).
+     HOW IT WORKS: mp4box gives the position of every sound chunk -> AudioDecoder -> average the channels ->
+     box-filter down to 16 kHz (average of the input samples that fall into one output sample).
+     HOW TO IMPROVE: compute the sound features while decoding so the 16 kHz array is not needed at all.   */
+  async function decodeAudioFast(v, rec, progress, ctl) {
+    if (v.noPlay && !(typeof AudioDecoder !== "undefined")) throw new Error("no fast audio path");
+    const idx = await parseMp4(v);
+    if (!idx.audio) throw new Error(idx.audioErr || "no audio track");
+    const a = idx.audio, sr = a.config.sampleRate, ratio = sr / 16000;
+    const pcm = new Float32Array(Math.ceil((v.duration + 3) * 16000) + 64);
+    let outPos = 0, phase = 0, acc = 0, cnt = 0, err = null, waiting = null, outCount = 0;
+    const dec = new AudioDecoder({
+      output: (ad) => {
+        try {
+          const nCh = ad.numberOfChannels, nF = ad.numberOfFrames, use = Math.min(2, nCh), tmp = new Float32Array(nF), mix = new Float32Array(nF);
+          for (let c = 0; c < use; c++) { ad.copyTo(tmp, { planeIndex: c, format: "f32-planar" }); for (let i = 0; i < nF; i++) mix[i] += tmp[i] / use; }
+          for (let i = 0; i < nF; i++) {
+            acc += mix[i]; cnt++; phase += 1;
+            if (phase >= ratio) { if (outPos < pcm.length) pcm[outPos++] = acc / cnt; acc = 0; cnt = 0; phase -= ratio; }
+          }
+          outCount++;
+        } catch (e) { err = e; } finally { ad.close(); if (waiting) { const w = waiting; waiting = null; w(); } }
+      },
+      error: (e) => { err = e; if (waiting) { const w = waiting; waiting = null; w(); } }
+    });
+    dec.configure(a.config);
+    const idle = () => new Promise((res) => { waiting = res; setTimeout(res, 300); });
+    try {
+      let k = 0;
+      while (k < a.n) {
+        if (err) throw err;
+        if (ctl && ctl.cancel) throw new Error(CANCEL);
+        const start = a.off[k]; let end = k;
+        while (end < a.n && a.off[end] + a.size[end] <= start + 6 * 1048576) end++;
+        if (end === k) end = k + 1;
+        const ab = await v.file.slice(start, a.off[end - 1] + a.size[end - 1]).arrayBuffer();
+        for (let i = k; i < end; i++) dec.decode(new EncodedAudioChunk({ type: "key", timestamp: Math.round(a.cts[i] * 1e6), duration: Math.round(a.dur[i] * 1e6), data: new Uint8Array(ab, a.off[i] - start, a.size[i]) }));
+        k = end;
+        let guard = 0;
+        while (dec.decodeQueueSize > 400 && guard++ < 200) { await idle(); if (err) throw err; }
+        progress && progress(k / a.n);
+        await tick();
+      }
+      await dec.flush();
+      if (err) throw err;
+    } finally { try { if (dec.state !== "closed") dec.close(); } catch (e) { /* ignore */ } }
+    if (outPos < 16000 * Math.min(10, v.duration * 0.5)) throw new Error("the fast audio decoder produced too little sound (" + outPos + " samples)");
+    return { sampleRate: 16000, numberOfChannels: 1, length: outPos, getChannelData: () => pcm.subarray(0, outPos), fast: true };
+  }
+
+  function makeDecoderSource(v, geom, fps, tim) {
     const step = 1 / fps;
     let info = null, dec = null, read = null, frames = [], si = 0, flushed = false, err = null, wantT = 0, lastFr = null, lastOut = 0, waiters = [];
     const wake = () => { const w = waiters; waiters = []; w.forEach((f) => f()); };
@@ -501,11 +606,21 @@ const Engine = (function () {
           while (frames.length && frames[0].timestamp / 1e6 < wantT) frames.shift().close();
           if (frames.length) {
             const f = frames.shift();
-            try { lastFr = { px: null, rp: null, mt: f.timestamp / 1e6 }; const r = read(f); lastFr.px = r.px; lastFr.rp = r.rp; } finally { f.close(); }
+            const tr = performance.now();
+            let bmp = null;
+            try {
+              lastFr = { px: null, rp: null, mt: f.timestamp / 1e6 };
+              // Turn the decoded frame into a normal picture ONCE (colour conversion), then cut the regions out of that.
+              try { bmp = await createImageBitmap(f); } catch (e) { bmp = null; }
+              const r = read(bmp || f); lastFr.px = r.px; lastFr.rp = r.rp;
+            } finally { f.close(); if (bmp && bmp.close) bmp.close(); }
+            if (tim) tim.readMs += performance.now() - tr;
             return lastFr;
           }
           if (flushed) { if (lastFr) return lastFr; throw new Error("The decoder returned no pictures."); }
+          const tw = performance.now();
           await feedMore();
+          if (tim) tim.waitMs += performance.now() - tw;
         }
       },
       close() {
@@ -716,8 +831,9 @@ const Engine = (function () {
       // TWO-STAGE MODE: only the short windows around gunfire are watched. Everything else is skipped (much faster).
       for (const w of opts.windows) {
         const a = clamp(Math.floor(w[0] * fps), 0, total - 1), b = clamp(Math.ceil(w[1] * fps), a + 1, total);
-        segs.push({ a, b, cur: a, err: null });
+        segs.push({ a, b, cur: a, err: null, strength: w[2] || 0 });
       }
+      segs.sort((x, y) => y.strength - x.strength);        // strongest gunfire first: if time runs out, the best parts are done
       rec.windowed = segs.length;
     } else {
       for (let k = 0; k < parts; k++) segs.push({ a: Math.floor((total * k) / parts), b: Math.floor((total * (k + 1)) / parts), cur: Math.floor((total * k) / parts), err: null });
@@ -725,9 +841,50 @@ const Engine = (function () {
     rec.workers = N;
     const need = Math.max(1, segs.reduce((s, g) => s + (g.b - g.a), 0));      // how many samples we really have to read
     const doneCount = () => segs.reduce((s, g) => s + (g.cur - g.a), 0);
+    // ---- TIME BUDGET, TIMING and CHECKPOINTS ----
+    // activeMs = time the scan really worked (a frozen phone / sleeping tab counts at most 8 s per step, so sleeping is not "slow").
+    // When the budget is used up the scan stops by itself and the result is made from what was read (strongest gunfire first).
+    ctl.stopSoft = false;
+    const budget = opts.budgetMs || 8 * 60e3, tim = { grabMs: 0, procMs: 0, readMs: 0, waitMs: 0, n: 0, freezes: 0, freezeMs: 0 };
+    rec.timing = Object.assign(rec.timing || {}, { scan: tim });
+    let activeMs = 0, lastRep = performance.now(), lastSave = performance.now();
+    const fp = fingerprint(v), sig = (() => { let h = 2166136261; const txt = JSON.stringify([fps, total, opts.regionWidth, opts.height, opts.regions, opts.tpl ? opts.tpl.id : 0, !!opts.collect]) + (opts.windows ? opts.windows.map((w) => Math.round(w[0]) + "-" + Math.round(w[1])).join(",") : ""); for (let i = 0; i < txt.length; i++) { h ^= txt.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); })();
+    const ckKey = fp ? "vs|" + fp + "|" + sig : "";
+    const saveCkpt = (final) => {
+      if (!ckKey) return;
+      try { Persist.cachePut(ckKey, { v: 1, total, final: !!final, segs: segs.map((g) => ({ a: g.a, b: g.b, cur: g.cur })), out: { t: out.t, motion: out.motion, flash: out.flash, red: out.red, cut: out.cut, mask: out.mask, mine: out.mine, mineN: out.mineN, pulse: out.pulse }, rows: out.rows }); } catch (e) { /* best effort */ }
+    };
+    const finishSoft = () => {
+      const frac = doneCount() / need;
+      out.incomplete = { fraction: frac, scanned: doneCount(), planned: need };
+      rec.attempts.push({ step: "frames", strategy: "time limit", ok: true, note: "stopped after " + Math.round(activeMs / 1000) + " s of work with " + Math.round(frac * 100) + "% of the planned pictures read" });
+      rec.notes.push("Time limit reached: " + Math.round(frac * 100) + "% of the planned pictures were read (strongest gunfire first). Run again to continue from where it stopped.");
+      saveCkpt(false);
+      return out;
+    };
+    // Resume: a saved copy of an earlier (interrupted or finished) scan of the SAME video and settings.
+    if (ckKey && !opts.noResume) {
+      const hit = await Persist.cacheGet(ckKey);
+      if (hit && hit.v === 1 && hit.total === total && hit.segs && hit.segs.length === segs.length && hit.segs.every((g, k) => g.a === segs[k].a && g.b === segs[k].b)) {
+        try {
+          for (const k of ["t", "motion", "flash", "red", "cut", "mask", "mine", "mineN"]) if (hit.out[k] && hit.out[k].length === out[k].length) out[k].set(hit.out[k]);
+          for (const k of Object.keys(out.pulse)) if (hit.out.pulse && hit.out.pulse[k] && hit.out.pulse[k].length === total) out.pulse[k].set(hit.out.pulse[k]);
+          out.rows = hit.rows || [];
+          hit.segs.forEach((g, k) => { segs[k].cur = Math.max(segs[k].a, Math.min(segs[k].b, g.cur)); });
+          const doneNow = segs.reduce((s2, g) => s2 + (g.cur - g.a), 0);
+          if (doneNow > 0) { rec.notes.push("Continued from a saved scan: " + Math.round((100 * doneNow) / need) + "% was already done."); rec.attempts.push({ step: "frames", strategy: "resume from cache", ok: true, note: Math.round((100 * doneNow) / need) + "% already read" }); }
+        } catch (e) { console.warn("Could not use the saved scan:", e); }
+      }
+    }
+    if (segs.every((g) => g.cur >= g.b)) { rec.frameSource = rec.frameSource || "cache"; return out; }
+    window.addEventListener("pagehide", () => saveCkpt(false), { once: true });
     let lastTick = 0;
     const report = async (force) => {
-      const now = performance.now();
+      const now = performance.now(), gap = now - lastRep;
+      if (gap > 20000) { tim.freezes++; tim.freezeMs += gap; }          // the page was frozen (screen off / app minimised)
+      activeMs += Math.min(gap, 8000); lastRep = now;
+      if (!ctl.stopSoft && activeMs > budget && doneCount() < need) ctl.stopSoft = true;
+      if (now - lastSave > 25000) { lastSave = now; saveCkpt(false); }
       if (!force && now - lastTick < 250) return;
       lastTick = now;
       const done = doneCount() / need, el = (now - t0) / 1000;
@@ -746,9 +903,13 @@ const Engine = (function () {
         await src.open(startAt);
         for (let i = startAt; i < seg.b; i++) {
           if (ctl.cancel) throw new Error(CANCEL);
+          if (ctl.stopSoft && i >= seg.cur) break;
+          const tg = performance.now();
           const fr = await src.grab(i, tOf(i));
+          const tp = performance.now();
           const prime = (i < seg.cur);
           proc(i, prime ? 0 : (fr.mt !== undefined ? Math.min(v.duration, fr.mt) : tOf(i)), fr, !prime);
+          tim.grabMs += tp - tg; tim.procMs += performance.now() - tp; tim.n++;
           if (!prime) { seg.cur = i + 1; await report(false); }
           first = false;
         }
@@ -759,23 +920,32 @@ const Engine = (function () {
     if (!opts.noDecoder && !v.deadSources.decoder && typeof VideoDecoder !== "undefined" && typeof EncodedVideoChunk !== "undefined" && typeof MP4Box !== "undefined") {
       const s0 = performance.now(), Nd = Math.max(1, Math.min(2, parts)), queueD = segs.filter((g) => g.cur < g.b);
       await Promise.all(Array.from({ length: Nd }, (_, k) => (async () => {
-        while (queueD.length) {
+        while (queueD.length && !ctl.stopSoft) {
           const seg = queueD.shift();
-          try { await runSeg(seg, makeDecoderSource(v, geom, fps), "decoder#" + k); }
-          catch (e) {
-            if (e && e.message === CANCEL) throw e;
-            seg.err = e;
-            rec.attempts.push({ step: "frames", strategy: "decoder#" + k + " (hardware decoder)", ok: false, error: errText(e), ms: Math.round(performance.now() - s0), note: "stopped at sample " + seg.cur + " of " + total });
-            console.warn("Decoder reader " + k + " failed:", e);
-            if (!segs.some((g) => g.cur > g.a)) { v.deadSources.decoder = true; queueD.length = 0; break; }       // never worked here: do not try again for this video
+          // A decoder can be taken away by Android (screen off, other app) - "Decoding error". Then a NEW decoder is started
+          // at the same place, up to 4 times, before this part is handed to the slower readers.
+          for (let attempt = 0; attempt < 5 && seg.cur < seg.b && !ctl.stopSoft; attempt++) {
+            const before = seg.cur;
+            try { await runSeg(seg, makeDecoderSource(v, geom, fps, tim), "decoder#" + k + (attempt ? " retry " + attempt : "")); }
+            catch (e) {
+              if (e && e.message === CANCEL) throw e;
+              seg.err = e;
+              rec.attempts.push({ step: "frames", strategy: "decoder#" + k + " (hardware decoder)", ok: false, error: errText(e), ms: Math.round(performance.now() - s0), note: "stopped at sample " + seg.cur + " of " + total + (attempt < 4 ? " - restarting the decoder" : "") });
+              console.warn("Decoder reader " + k + " failed:", e);
+              if (!segs.some((g) => g.cur > g.a)) { v.deadSources.decoder = true; queueD.length = 0; break; }       // never worked here: do not try again for this video
+              if (seg.cur === before && attempt >= 1) break;                                                       // restarting does not help here
+              await new Promise((r) => setTimeout(r, 400));
+            }
           }
         }
       })()));
       if (segs.every((g) => g.cur >= g.b)) {
         rec.frameSource = "decoder x" + Nd;
         rec.attempts.push({ step: "frames", strategy: "decoder x" + Nd + " (hardware decoder, no playback)", ok: true, ms: Math.round(performance.now() - s0) });
+        saveCkpt(true);
         return out;
       }
+      if (ctl.stopSoft) return finishSoft();
     }
 
     // ---- stage 1: fast stream readers, all parts at once ----
@@ -784,7 +954,7 @@ const Engine = (function () {
       const s0 = performance.now();
       const queue = segs.filter((g) => g.cur < g.b);
       await Promise.all(Array.from({ length: N }, (_, k) => (async () => {
-        while (queue.length) {
+        while (queue.length && !ctl.stopSoft) {
           const seg = queue.shift();
           try {
             await runSeg(seg, makeVideoSource(v, geom, "stream", async () => ({ url: v.url }), "stream", { rate, fps, ctl }), "stream#" + k);
@@ -816,8 +986,10 @@ const Engine = (function () {
           }
         }
       }
+      if (ctl.stopSoft) return finishSoft();
       if (segs.every((g) => g.cur >= g.b)) {
         rec.frameSource = "stream x" + N;
+        saveCkpt(true);
         rec.attempts.push({ step: "frames", strategy: "stream x" + N + " (fast playback, " + N + " parts at once)", ok: true, ms: Math.round(performance.now() - s0) });
         return out;
       }
@@ -834,6 +1006,7 @@ const Engine = (function () {
     let lastErr = null;
     for (const seg of segs) {
       while (seg.cur < seg.b) {
+        if (ctl.stopSoft) return finishSoft();
         const cand = chainDef.find((c) => !v.deadSources[c.name] && !(v.noPlay && c.name !== "ffmpeg") && !(c.name === "memory" && v.file.size > 6e8));
         if (!cand) {
           const err = new Error("Every way of reading video pictures failed. Last error: " + (lastErr ? lastErr.message : (seg.err && seg.err.message)));
@@ -855,6 +1028,7 @@ const Engine = (function () {
         }
       }
     }
+    saveCkpt(true);
     return out;
   }
 
@@ -930,7 +1104,15 @@ const Engine = (function () {
       progress && progress(0.02, "Listening to every audio sample...");
       try {
         if (v.file.size > 1.5e9) throw new Error("file too big to decode audio");
+        const fp = fingerprint(v), akey = "au|" + fp;
+        const hit = fp ? await Persist.cacheGet(akey) : null;
+        if (hit && hit.v === 2 && hit.au && hit.au.nF > 10) { au = hit.au; rec.notes.push("The sound analysis came from the cache (instant)."); rec.attempts.push({ step: "audio", strategy: "cache", ok: true, ms: 0 }); }
+        else {
+        const ta = performance.now();
         au = await audioScan(v, ctl, (f) => progress && progress(typeof f === "number" ? 0.02 + 0.23 * f : 0.02, typeof f === "string" ? f : "Listening to every audio sample..."), rec);
+        rec.timing = Object.assign(rec.timing || {}, { audioMs: Math.round(performance.now() - ta) });
+        if (fp) Persist.cachePut(akey, { v: 2, au });
+        }
         audioOk = true;
       } catch (e) {
         if (e.message === CANCEL) throw e;
@@ -944,6 +1126,12 @@ const Engine = (function () {
     let windows = null;
     if (opts.hunt && au && opts.useVisual !== false && v.duration > 90) {
       windows = audioWindows(au, v.duration, 3.2, 2.4);
+      // TIME BUDGET: never plan more than ~3600 pictures (about 6-7 minutes on a phone). More than that -> fewer pictures per second.
+      const scanSec = windows ? windows.reduce((s, w) => s + w[1] - w[0], 0) : v.duration, cap = opts.maxSamples || 3600;
+      if (opts.fps * scanSec > cap) {
+        const nf = Math.max(1.5, Math.round((cap / scanSec) * 10) / 10);
+        if (nf < opts.fps) { rec.notes.push("Planned " + Math.round(opts.fps * scanSec) + " pictures - too many for a quick result, so " + nf + " pictures per second are used instead."); opts = Object.assign({}, opts, { fps: nf }); }
+      }
       if (windows) rec.notes.push("Two-stage mode: only " + Math.round(windows.reduce((s, w) => s + w[1] - w[0], 0)) + " s of " + Math.round(v.duration) + " s around gunfire was watched.");
     }
     if (opts.useVisual !== false) {
@@ -964,6 +1152,7 @@ const Engine = (function () {
 
     progress && progress(0.96, "Building time lines...");
     const chData = buildChannels(v, au, vis, opts.fps);
+    rec.timing = Object.assign(rec.timing || {}, { totalMs: Math.round(performance.now() - t0) });
 
     // Per-second values used by the Classic mode.
     const secs = Math.ceil(v.duration);
@@ -971,8 +1160,8 @@ const Engine = (function () {
     for (let s = 0; s < secs; s++) { loudSec[s] = avg(chData.ch.loud, s * 10, s * 10 + 10); motionSec[s] = avg(chData.ch.motion, s * 10, s * 10 + 10); }
 
     return {
-      dt: DT, N: chData.nG, ch: chData.ch, onsets: chData.onsets, audioOk,
-      rows: vis ? vis.rows || [] : [], hasVisual: !!vis, partial, windowed: !!windows, hasTemplate: !!(opts.tpl && vis), recovery: rec, fps: opts.fps, regions: opts.regions || {}, profileId: opts.profile,
+      dt: DT, N: chData.nG, ch: chData.ch, onsets: chData.onsets, audioOk, audioMusic: chData.onsets && { beats: chData.onsets.musicBeats || 0, sec: chData.onsets.musicSec || 0 },
+      rows: vis ? vis.rows || [] : [], hasVisual: !!vis, partial, incomplete: vis && vis.incomplete ? vis.incomplete : null, windowed: !!windows, hasTemplate: !!(opts.tpl && vis), recovery: rec, fps: opts.fps, regions: opts.regions || {}, profileId: opts.profile,
       loudSec, motionSec, seconds: (performance.now() - t0) / 1000, duration: v.duration
     };
   }
@@ -1202,6 +1391,23 @@ const Engine = (function () {
     return out;
   }
 
+  /* ---------------------------------------------------------------
+     NEVER-EMPTY FALLBACK (v5.5): when no kill could be confirmed, still hand over the most promising moments,
+     picked by SOUND only (dense loud gunfire), clearly labelled "Maybe" so nobody mistakes them for confirmed kills.
+     The first ~45 s (lobby / waiting) are skipped. HOW TO IMPROVE: add the kill-feed activity as a second vote.  */
+  function fallbackPicks(an, params) {
+    const secs = an.loudSec.length;
+    if (secs < 30) return [];
+    const gun = new Float32Array(secs);
+    for (const o of an.onsets || []) { const s = Math.floor(o.t); if (s >= 0 && s < secs) gun[s] += Math.min(3, o.s); }
+    const gm = percentile(gun, 0.98) || 1, lm = percentile(an.loudSec, 0.98) || 1, skip = Math.min(45, secs * 0.1);
+    const mixed = new Float32Array(secs);
+    for (let i = skip; i < secs; i++) if (typeof Referee === "undefined" || Referee.live(an, i)) mixed[i] = 0.65 * Math.min(1, gun[i] / gm) + 0.35 * Math.min(1, an.loudSec[i] / lm);
+    const an2 = Object.assign({}, an, { loudSec: mixed, motionSec: new Float32Array(secs), audioOk: true });
+    const picks = classic(an2, { focus: 1, length: Math.min(params.length || 20, 30), count: params.count || 6, snap: params.snap || 0 });
+    return picks.map((c) => Object.assign(c, { label: "Maybe", kills: 0, conf: Math.min(0.4, c.conf), why: "Maybe: lots of loud gunfire here (picked by sound only - NOT confirmed as your kill, please check)", fallback: true }));
+  }
+
   /* A small preview picture of the video (used in the library list). */
   async function thumbnail(v) {
     const vid = document.createElement("video");
@@ -1216,5 +1422,5 @@ const Engine = (function () {
     catch (e) { console.warn("Thumbnail skipped (canvas is protected):", e.message); return ""; }
   }
 
-  return { analyse, detect, buildClips, classic, thumbnail, DT, CANCEL, quietPoint };
+  return { analyse, detect, buildClips, classic, fallbackPicks, thumbnail, DT, CANCEL, quietPoint };
 })();

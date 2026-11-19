@@ -523,7 +523,11 @@ function applySuggestions(v) {
     v.relaxed = 0;      // (an automatic "easier settings" retry was removed: wrong clips are worse than none)
     const maxLen = PLATFORMS[P.platform].max;
     found = Engine.buildClips(v.an, v.det, { maxLen, minLen: Math.min(10, maxLen), fixedLen: P.length || 0, pre: P.pre, post: P.post, count: P.count, snap: P.snap > 0 });
+    // NEVER EMPTY: nothing confirmed -> still show the loudest gunfire moments, labelled "Maybe".
+    v.fallback = false;
+    if (!found.length && v.an.audioOk) { try { found = Engine.fallbackPicks(v.an, { length: P.length || 20, count: P.count, snap: P.snap }); v.fallback = found.length > 0; } catch (e) { console.warn("Fallback picks failed:", e); } }
   } else {
+    v.fallback = false;
     v.det = null;
     found = Engine.classic(v.an, { focus: P.focus, length: P.length || 30, count: P.count, snap: P.snap });
   }
@@ -553,7 +557,9 @@ $("analyseBtn").addEventListener("click", async () => {
   const n = v.clips.filter((c) => c.auto).length;
   let st = v.det && v.det.stats, autoNote = v.an && v.an.auto ? (v.an.auto.ok ? " Your name was found automatically (" + v.an.auto.stats.learned.withGun + " matching kills)." : " Automatic name search did not work (" + v.an.auto.reason + "), so the clue method was used.") : "", why = st ? " Moments checked: " + st.candidates + (Object.keys(st.reasons).length ? " - rejected: " + Object.entries(st.reasons).map(([k, c]) => c + "x " + k).join("; ") : "") + "." : "";
   why += autoNote;
-  setAState(n ? "Found " + n + " clip(s) around kills (" + (P.method === "hunter" ? "Main-player kills only" : P.method) + "). Scroll down to check them." + (v.relaxed ? " (Nothing passed the strict test, so easier settings were used - please check each clip.)" : "") : "No kill of the main player was recognised (method: " + (P.method === "hunter" ? "Main-player kills only" : P.method) + ")." + why + " Try Sensitivity 1.5-2, Deep detail (10 fps), or check the kill-feed box with Calibrate.", 1);
+  const inc = v.an && v.an.incomplete ? " Time limit reached: " + Math.round(v.an.incomplete.fraction * 100) + "% of the planned pictures were read (strongest gunfire first) - press the button again to continue from where it stopped." : "";
+  if (v.fallback) { setAState("No kill of yours could be CONFIRMED, so " + n + " 'Maybe' moment(s) were picked by sound (loudest gunfire). Please check them." + why + inc + " Tap Troubleshoot to see why.", 1); toast(n + " 'Maybe' moments added (sound only)."); $("sec-clips").scrollIntoView({ behavior: "smooth" }); return; }
+  setAState(n ? "Found " + n + " clip(s) around kills (" + (P.method === "hunter" ? "Main-player kills only" : P.method) + "). Scroll down to check them." + inc + (v.relaxed ? " (Nothing passed the strict test, so easier settings were used - please check each clip.)" : "") : "No kill of the main player was recognised (method: " + (P.method === "hunter" ? "Main-player kills only" : P.method) + ")." + why + " Try Sensitivity 1.5-2, Deep detail (10 fps), or check the kill-feed box with Calibrate.", 1);
   if (n) { toast("Found " + n + " highlight clip(s)."); $("sec-clips").scrollIntoView({ behavior: "smooth" }); }
 });
 $("cancelAnalyseBtn").addEventListener("click", () => { aCtl.cancel = true; });
@@ -1413,6 +1419,7 @@ function diagContext() {
   Cloud.flushDeletes();
   restoreLibrary().then(() => pullFromServer());
   if (typeof Diag !== "undefined") Diag.init(diagContext);   // error reports + pop-up
+  try { if (typeof Persist !== "undefined" && Persist.cacheTidy) Persist.cacheTidy(7); } catch (e) { /* cache clean-up is optional */ }
   syncUI();
   const missing = [];
   if (!window.MediaRecorder) missing.push("video recording (Fast recorder will not work)");
