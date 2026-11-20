@@ -905,6 +905,13 @@ const FILE_GONE = "The stored copy of this video is no longer available (another
 async function exportClip(v, clip, worker, quiet) {
   worker = worker || Exporter;
   const base = readExport();
+  if (base.fit === "track" && !base.trackPrior) {       // PLAYER TRACKING start point: the AI looks at one frame (if connected), otherwise the screen centre
+    base.trackPrior = { x: 0.5, y: 0.5 };
+    if (typeof AI !== "undefined" && AI.connected()) {
+      try { const pr = await Promise.race([AI.locatePlayer(v, (clip.start + clip.end) / 2), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 30000))]); if (pr) { base.trackPrior = pr; clip.trackNote = "AI found the player at " + Math.round(pr.x * 100) + "%, " + Math.round(pr.y * 100) + "% (" + (pr.view || "?") + " view)"; } }
+      catch (e) { console.warn("AI player locator skipped:", e); }
+    }
+  }
   if (v.noPlay && (base.engine === "fast" || base.engine === "turbo")) base.engine = "hq";      // these two need a video the browser can play
   if (base.engine === "turbo" && !Exporter.turboAvailable()) base.engine = "hq";
   const card = $("clipList").querySelector(`.clip[data-id="${clip.id}"]`);

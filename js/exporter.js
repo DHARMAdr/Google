@@ -207,6 +207,7 @@ const Exporter = (function () {
   /* ---------- HQ + COPY export through ffmpeg ---------- */
   async function exportFF(v, clip, o, onProgress, onStatus) {
     cancelled = false;
+    if (o.fit === "track") { const pr = o.trackPrior || { x: 0.5, y: 0.5 }; o = Object.assign({}, o, { fit: "fill", posX: pr.x, posY: 0.5 }); }
     await loadEngine(onStatus);
     const src = await mountVideo(v);
     const dur = clip.end - clip.start;
@@ -293,9 +294,11 @@ const Exporter = (function () {
   function paintFrame(g, small, sg, vid, W, H, o) {
     const vw = vid.videoWidth, vh = vid.videoHeight;
     if (o.shape === "original") { g.drawImage(vid, 0, 0, W, H); return; }
-    if (o.fit === "fill") {
+    if (o.fit === "fill" || o.fit === "track") {
       const sc = Math.max(W / vw, H / vh), dw = vw * sc, dh = vh * sc;
-      g.drawImage(vid, (W - dw) * (o.posX ?? 0.5), (H - dh) * (o.posY ?? 0.5), dw, dh); return;
+      let px = o.posX ?? 0.5, py = o.posY ?? 0.5;
+      if (o._tr) { const q = Track.cropPos(o._tr.update(vid), dw, dh, W, H); px = q.x; py = q.y; }      // TRACKING: the crop follows the action, frame by frame
+      g.drawImage(vid, (W - dw) * px, (H - dh) * py, dw, dh); return;
     }
     if (o.fit === "blur") {
       const sc = Math.max(small.width / vw, small.height / vh);
@@ -325,8 +328,10 @@ const Exporter = (function () {
     return ff;
   }
 
+  // fit "track": the turbo / fast engines follow the action frame by frame (o._tr); the ffmpeg engine uses the AI start point as a fixed crop.
+  const withTracker = (o) => (o.fit === "track" && typeof Track !== "undefined" ? Object.assign({}, o, { _tr: Track.create(o.trackPrior) }) : o);
   async function exportTurbo(v, clip, o, onProgress, onStatus) {
-    cancelled = false;
+    cancelled = false; o = withTracker(o);
     if (!turboAvailable()) throw new Error("Turbo export needs a browser with WebCodecs (Chrome / Edge). Use 'Best quality' instead.");
     if (v.noPlay || !v.url) throw new Error("Turbo export needs a video the browser can play.");
     const speed = o.speed || 1, dur = clip.end - clip.start, outDur = dur / speed;
@@ -550,6 +555,7 @@ const Exporter = (function () {
 
   /* ---------- FAST export (real-time recorder, the first version's method) ---------- */
   async function exportFast(v, clip, o, onProgress, onStatus, ctl, hiddenVideo) {
+    o = withTracker(o);
     if (!window.MediaRecorder) throw new Error("This browser cannot record video. Use Chrome, Edge or Firefox on a computer.");
     const ev = hiddenVideo;
     ev.src = v.url;
@@ -627,9 +633,11 @@ const Exporter = (function () {
     const vw = ev.videoWidth, vh = ev.videoHeight;
     g.fillStyle = "#000"; g.fillRect(0, 0, W, H);
     if (o.shape === "original") { g.drawImage(ev, 0, 0, W, H); return; }
-    if (o.fit === "fill") {
+    if (o.fit === "fill" || o.fit === "track") {
       const s = Math.max(W / vw, H / vh), dw = vw * s, dh = vh * s;
-      g.drawImage(ev, (W - dw) * (o.posX ?? 0.5), (H - dh) * (o.posY ?? 0.5), dw, dh); return;
+      let px = o.posX ?? 0.5, py = o.posY ?? 0.5;
+      if (o._tr) { const q = Track.cropPos(o._tr.update(ev), dw, dh, W, H); px = q.x; py = q.y; }
+      g.drawImage(ev, (W - dw) * px, (H - dh) * py, dw, dh); return;
     }
     if (o.fit === "blur") {
       const sc = Math.max(W / vw, H / vh);

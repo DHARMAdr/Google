@@ -150,11 +150,25 @@ const AI = (function () {
     return Object.assign({ ok: true }, out);
   }
 
+  /* PLAYER LOCATOR (v5.10): ONE frame goes to Claude: "where is the main player's character / weapon / crosshair?"
+     Returns {x, y} (fractions 0..1 of the picture) or null. Used as the START POINT of the tracker (js/track.js). */
+  async function locatePlayer(v, t) {
+    const el = await openVideo(v);
+    try {
+      await seek(el, t);
+      const b64 = crop(el, { x: 0, y: 0, w: 1, h: 1 });
+      const text = await ask({ max_tokens: 200, system: "You analyse one frame of mobile/PC shooter gameplay. Answer ONLY with JSON.",
+        messages: [{ role: "user", content: [{ type: "text", text: "Where is the MAIN PLAYER'S OWN character on this screen? In a third-person game (PUBG Mobile, Free Fire, CoD Mobile) give the centre of the player's character. In a first-person game (Valorant) the character is not visible: give the crosshair centre. Return {\"x\": 0-1 from the left, \"y\": 0-1 from the top, \"view\": \"first\"|\"third\", \"conf\": 0-1}." }, { type: "image", source: { type: "base64", media_type: "image/jpeg", data: b64 } }] }] });
+      const a = text.indexOf("{"), z = text.lastIndexOf("}"), o = JSON.parse(text.slice(a, z + 1));
+      return o && o.x >= 0 && o.x <= 1 && o.y >= 0 && o.y <= 1 && (+o.conf || 0) >= 0.4 ? { x: +o.x, y: +o.y, view: o.view } : null;
+    } finally { try { el.removeAttribute("src"); el.load(); } catch (e) { /* ignore */ } }
+  }
+
   // Quick connection test (one tiny question, no picture).
   async function test() {
     const t = await ask({ max_tokens: 30, messages: [{ role: "user", content: "Reply with the single word: ready" }] });
     return t.trim().slice(0, 40);
   }
 
-  return { verify, test, cfg, MODELS, useWorker };
+  return { verify, test, locatePlayer, connected: () => !!cfg().key || useWorker(), cfg, MODELS, useWorker };
 })();
