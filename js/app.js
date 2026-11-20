@@ -68,7 +68,7 @@ function readParams() {
   // The Hunter needs a game profile with screen boxes (kill feed, banner, hit marker). "Any video" has none, so use the common top-right layout.
   let profile = $("profileSel").value;
   // Unknown layout (no feed box, or the built-in top-right/top-left guesses that were never calibrated): watch the whole top strip.
-  if (method === "hunter" && (!(PROFILES[profile] && PROFILES[profile].feed) || (["shooter_tr", "shooter_tl"].includes(profile) && !store.get("regions." + profile, null)))) profile = "shooter_top";
+  if ((method === "hunter" || method === "ai") && (!(PROFILES[profile] && PROFILES[profile].feed) || (["shooter_tr", "shooter_tl"].includes(profile) && !store.get("regions." + profile, null)))) profile = "shooter_top";
   return {
     method, profile, fps: parseFloat($("depthSel").value),
     platform: $("platformSel").value, length,
@@ -444,6 +444,7 @@ function updateAnState() {
 }
 
 // The analysis only needs repeating if the frame rate or kill-feed boxes changed.
+const isHunt = (P) => P.method === "hunter" || P.method === "ai";      // both scan for MY kills (the AI method adds the AI check)
 function getRegions(profileId) {
   const prof = PROFILES[profileId];
   if (!prof.feed) return {};
@@ -451,7 +452,7 @@ function getRegions(profileId) {
 }
 function analysisKey(P) {
   if (P.method === "classic") return "classic";
-  return (P.method === "hunter" ? "hunter|" + (typeof Teach !== "undefined" && Teach.get() ? "name" + Teach.get().id + "|" : "auto|") : "smart|") + P.fps + "|" + JSON.stringify(getRegions(P.profile));
+  return (isHunt(P) ? (P.method === "ai" ? "ai|" + AI.cfg().model + "|" + AI.cfg().name + "|" : "hunter|") + (typeof Teach !== "undefined" && Teach.get() ? "name" + Teach.get().id + "|" : "auto|") : "smart|") + P.fps + "|" + JSON.stringify(getRegions(P.profile));
 }
 
 function setAState(text, p, err) {
@@ -468,6 +469,7 @@ function setBusy(on) {
 // Returns true if the video now has an analysis.
 async function doAnalyse(v) {
   const P = readParams(), classic = P.method === "classic";
+  if (P.method === "ai" && !AI.cfg().key && !AI.useWorker()) { setAState("AI Referee needs a connection: paste an Anthropic API key in the AI box, or log in to a server that has the ANTHROPIC_API_KEY secret.", 0, true); toast("AI Referee: no AI connection yet - see the AI box.", true); return false; }
   const key = analysisKey(P);
   if (v.an && (v.anKey === key || classic)) return true;           // already done: reuse it
   if (!(await ensureFile(v))) { setAState(FILE_GONE, 0, true); reportProblem(new Error(FILE_GONE), { recovered: false, stage: "analyse" }); return false; }
@@ -475,19 +477,25 @@ async function doAnalyse(v) {
   const prof = PROFILES[P.profile];
   let fps = classic ? 1 : P.fps;
   const tpl = !classic && P.method === "hunter" && typeof Teach !== "undefined" ? Teach.get() : null;        // the taught picture of the user's name (or null)
-  const autoName = !classic && P.method === "hunter" && !tpl && typeof AutoName !== "undefined";      // no taught name: find it automatically
-  if (!classic && P.method === "hunter" && fps > 4) fps = 4;       // name matching only needs ~4 pictures per second (a kill-feed line stays visible for seconds): much faster
+  const useAI = !classic && P.method === "ai", autoName = !classic && P.method === "hunter" && !tpl && typeof AutoName !== "undefined";      // no taught name: find it automatically
+  if (!classic && isHunt(P) && fps > 4) fps = 4;       // name matching only needs ~4 pictures per second (a kill-feed line stays visible for seconds): much faster
   const regions = classic ? {} : Object.assign({}, getRegions(P.profile), tpl ? { killfeed: Teach.region(tpl) } : {});
   aCtl = { cancel: false };
   setBusy(true); setAState("Starting...", 0.01); Compat.keepAwake(true);
   try {
-    v.an = await Engine.analyse(v, { fps, regions, hunt: P.method === "hunter", tpl, profile: classic ? "auto" : P.profile, height: fps >= 10 ? 144 : 108, regionWidth: tpl || autoName ? 480 : fps >= 30 ? 320 : 240, collect: autoName ? { vw: v.w, vh: v.h } : null },
+    v.an = await Engine.analyse(v, { fps, regions, hunt: isHunt(P), tpl, profile: classic ? "auto" : P.profile, height: fps >= 10 ? 144 : 108, regionWidth: tpl || autoName || useAI ? 480 : fps >= 30 ? 320 : 240, collect: autoName || useAI ? { vw: v.w, vh: v.h } : null },
       aCtl, (f, text) => setAState(typeof text === "string" ? text : "Working...", f));
     v.anKey = key;
     if (autoName && !v.an.partial && v.an.rows) {
       setAState("Learning which kill-feed name is yours...", 0.97);
       try { v.an.auto = await AutoName.run(v.an, (f, t) => setAState(t, 0.97 + 0.03 * f)); }
       catch (e) { v.an.auto = { ok: false, reason: errText(e) }; console.warn("AutoName failed:", e); }
+    }
+    if (useAI && !v.an.partial) {
+      setAState("AI Referee: preparing the moments...", 0.97);
+      const pos = { tr: { x: 0.5, y: 0.0, w: 0.5, h: 0.36 }, tl: { x: 0.0, y: 0.0, w: 0.5, h: 0.36 }, top: { x: 0.0, y: 0.0, w: 1.0, h: 0.3 } }[store.get("ai.pos", "tr")] || { x: 0.5, y: 0, w: 0.5, h: 0.36 };
+      try { v.an.ai = await AI.verify(v, v.an, { region: pos, onProgress: (f, t) => setAState(t, 0.97 + 0.03 * f), cancel: () => aCtl.cancel }); }
+      catch (e) { if (e.message === Engine.CANCEL) throw e; v.an.ai = { ok: false, reason: errText(e) }; console.warn("AI Referee failed:", e); toast("AI Referee failed: " + errText(e), true); }
     }
     const rec = v.an.recovery, failed = rec ? rec.attempts.filter((a) => !a.ok) : [];
     if (v.an.partial) {
@@ -528,16 +536,16 @@ function applySuggestions(v) {
   if (!v || !v.an) return;
   const P = readParams();
   let found;
-  if (P.method === "smart" || P.method === "hunter") {
+  if (P.method === "smart" || isHunt(P)) {
     v.fb = v.fb || { bad: [], good: [] };
-    v.det = (P.method === "hunter" ? Hunter : Engine).detect(v.an, { profile: P.profile, sens: P.method === "hunter" ? Math.max(1, P.sens) : P.sens, gap: P.gap, exclude: v.fb.bad.map((b) => b.t), sideRule: sideRuleFrom(v.fb) });
+    v.det = (isHunt(P) ? Hunter : Engine).detect(v.an, { profile: P.profile, sens: isHunt(P) ? Math.max(1, P.sens) : P.sens, gap: P.gap, exclude: v.fb.bad.map((b) => b.t), sideRule: sideRuleFrom(v.fb) });
     v.relaxed = 0;      // (an automatic "easier settings" retry was removed: wrong clips are worse than none)
     const maxLen = PLATFORMS[P.platform].max;
     found = Engine.buildClips(v.an, v.det, { maxLen, minLen: Math.min(10, maxLen), fixedLen: P.length || 0, pre: P.pre, post: P.post, count: P.count, snap: P.snap > 0 });
     // After the user removed clips: if fewer than the wanted number are left, look again with a more open mind (more sensitive) so DIFFERENT moments show up - they are marked REVIEW.
     if (v.fb.bad.length && found.length < P.count) {
       try {
-        const det2 = (P.method === "hunter" ? Hunter : Engine).detect(v.an, { profile: P.profile, sens: Math.max(1, P.sens) * 1.6, gap: P.gap, exclude: v.fb.bad.map((b) => b.t), sideRule: sideRuleFrom(v.fb) });
+        const det2 = (isHunt(P) ? Hunter : Engine).detect(v.an, { profile: P.profile, sens: Math.max(1, P.sens) * 1.6, gap: P.gap, exclude: v.fb.bad.map((b) => b.t), sideRule: sideRuleFrom(v.fb) });
         const more = Engine.buildClips(v.an, det2, { maxLen, minLen: Math.min(10, maxLen), fixedLen: P.length || 0, pre: P.pre, post: P.post, count: P.count, snap: P.snap > 0 });
         more.forEach((m) => { if (found.length < P.count && !found.some((f) => Math.min(f.end, m.end) - Math.max(f.start, m.start) > 0)) { m.events = (m.events || []).map((e) => Object.assign({}, e, { tier: "review" })); found.push(m); } });
       } catch (e) { console.warn("Second look failed:", e); }
@@ -581,7 +589,7 @@ $("analyseBtn").addEventListener("click", async () => {
   why += autoNote;
   const inc = v.an && v.an.incomplete ? " Time limit reached: " + Math.round(v.an.incomplete.fraction * 100) + "% of the planned pictures were read (strongest gunfire first) - press the button again to continue from where it stopped." : "";
   if (v.fallback) { setAState("No kill of yours could be CONFIRMED, so " + n + " 'Maybe' moment(s) were picked by sound (loudest gunfire). Please check them." + why + inc + " Tap Troubleshoot to see why.", 1); toast(n + " 'Maybe' moments added (sound only)."); $("sec-clips").scrollIntoView({ behavior: "smooth" }); return; }
-  setAState(n ? "Found " + n + " clip(s) around kills (" + (P.method === "hunter" ? "Main-player kills only" : P.method) + "). Scroll down to check them." + inc + (v.relaxed ? " (Nothing passed the strict test, so easier settings were used - please check each clip.)" : "") : "No kill of the main player was recognised (method: " + (P.method === "hunter" ? "Main-player kills only" : P.method) + ")." + why + " Try Sensitivity 1.5-2, Deep detail (10 fps), or check the kill-feed box with Calibrate.", 1);
+  setAState(n ? "Found " + n + " clip(s) around kills (" + (P.method === "ai" ? "AI Referee: your kills only" : isHunt(P) ? "Main-player kills only" : P.method) + "). Scroll down to check them." + inc + (v.relaxed ? " (Nothing passed the strict test, so easier settings were used - please check each clip.)" : "") : "No kill of the main player was recognised (method: " + (P.method === "hunter" ? "Main-player kills only" : P.method) + ")." + why + " Try Sensitivity 1.5-2, Deep detail (10 fps), or check the kill-feed box with Calibrate.", 1);
   if (n) { toast("Found " + n + " highlight clip(s)."); $("sec-clips").scrollIntoView({ behavior: "smooth" }); }
 });
 $("cancelAnalyseBtn").addEventListener("click", () => { aCtl.cancel = true; });
@@ -1529,4 +1537,21 @@ function diagContext() {
   if (!(window.AudioContext || window.webkitAudioContext)) missing.push("audio analysis");
   setStatus(missing.length ? "Your browser lacks: " + missing.join(", ") + ". Use Chrome or Edge on a computer." : "Add a video to begin.", 0, missing.length > 0);
   renderStats();
+})();
+
+
+/* ---------- AI Referee settings box (v5.9) ---------- */
+(function aiBox() {
+  const box = $("aiBox"); if (!box) return;
+  const c = AI.cfg(); $("aiName").value = c.name; $("aiModel").value = c.model; $("aiKey").value = c.key; $("aiPos").value = store.get("ai.pos", "tr");
+  const sync = () => { box.hidden = $("methodSel").value !== "ai"; };
+  $("methodSel").addEventListener("change", sync); sync();
+  const bind = (id, key) => $(id).addEventListener("change", () => store.set(key, $(id).value.trim()));
+  bind("aiName", "ai.name"); bind("aiModel", "ai.model"); bind("aiKey", "ai.key"); bind("aiPos", "ai.pos");
+  $("aiTest").addEventListener("click", async () => {
+    ["ai.name", "ai.model", "ai.key", "ai.pos"].forEach((k, i) => store.set(k, $(["aiName", "aiModel", "aiKey", "aiPos"][i]).value.trim()));
+    $("aiMsg").textContent = "Testing...";
+    try { const r = await AI.test(); $("aiMsg").textContent = "OK - the AI answered: " + r + (AI.cfg().key ? " (direct key)" : " (through your server)"); }
+    catch (e) { $("aiMsg").textContent = "FAILED: " + errText(e); }
+  });
 })();

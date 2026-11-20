@@ -28,7 +28,7 @@
    ===================================================================== */
 
 const CHUNK = 8 * 1024 * 1024;          // size of one piece (the site asks for this size)
-const VERSION = "storage-2.1";
+const VERSION = "storage-2.2";
 
 const json = (data, status, cors) => new Response(JSON.stringify(data), { status: status || 200, headers: Object.assign({ "Content-Type": "application/json" }, cors || {}) });
 
@@ -139,7 +139,7 @@ export default {
       if (p === "/api/health") {
         // Extra facts so the site's "Check server" pop-up can say WHY something does not work (no secrets are shown, only yes/no).
         const origin = req.headers.get("Origin"), list = (env.ALLOWED_ORIGINS || "https://dharmadr.github.io").split(",").map((x) => x.trim());
-        return json({ ok: true, app: "clipcutter-server", version: VERSION, storageOnly: true, profiles: true, bucketBound: !!env.BUCKET, tokenSet: !!env.TOKEN, openSignup: String(env.OPEN_SIGNUP || "1") !== "0", originSeen: origin || "", originAllowed: !!origin && (list.includes("*") || list.includes(origin)), state: true }, 200, cors);
+        return json({ ok: true, app: "clipcutter-server", version: VERSION, storageOnly: true, profiles: true, bucketBound: !!env.BUCKET, tokenSet: !!env.TOKEN, aiReady: !!env.ANTHROPIC_API_KEY, openSignup: String(env.OPEN_SIGNUP || "1") !== "0", originSeen: origin || "", originAllowed: !!origin && (list.includes("*") || list.includes(origin)), state: true }, 200, cors);
       }
       if (!env.TOKEN) return json({ error: "the server has no TOKEN secret yet (add the secret named TOKEN)" }, 500, cors);
 
@@ -176,6 +176,19 @@ export default {
       if (p === "/api/me") return json({ ok: true, user: me.name, role: me.role }, 200, cors);
 
       const maxBytes = (parseFloat(env.MAX_GB) || 8) * 1e9, ttlHours = parseFloat(env.TTL_HOURS) || 0;
+
+      /* ----- AI Referee proxy (v5.9): the site sends small kill-feed pictures here, the Worker adds YOUR Anthropic key
+         (secret ANTHROPIC_API_KEY, never visible to the browser) and forwards to Claude. Only logged-in users can use it. ----- */
+      if (p === "/api/ai" && req.method === "POST") {
+        if (!env.ANTHROPIC_API_KEY) return json({ error: "AI is not enabled on this server: add a secret named ANTHROPIC_API_KEY" }, 501, cors);
+        const raw = await req.text();
+        if (raw.length > 8e6) return json({ error: "request too large" }, 413, cors);
+        let j; try { j = JSON.parse(raw); } catch (e) { return json({ error: "bad json" }, 400, cors); }
+        if (!["claude-haiku-5-5", "claude-sonnet-5-5"].includes(j.model)) j.model = "claude-haiku-5-5";
+        j.max_tokens = Math.min(j.max_tokens || 1500, 3000);
+        const r = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "x-api-key": env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" }, body: JSON.stringify(j) });
+        return new Response(await r.text(), { status: r.status, headers: Object.assign({ "Content-Type": "application/json" }, cors) });
+      }
 
       if (p === "/api/info" && req.method === "GET") {
         const used = await usedBytes(env), metas = await allVideoMetas(env), mine = isAdmin ? metas : metas.filter((m) => m.owner === me.name);

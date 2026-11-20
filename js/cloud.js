@@ -310,5 +310,7 @@ const Cloud = (function () {
   }
 
   const canRender = () => { try { return store.get("cloudCanRender", true) !== false; } catch (e) { return true; } };
-  return { login, register, logout, profile, listMine, adminUsers, adminVideos, adminPin, adminDelete, delVideoId, delClipId, fetchBlob, putClip, canRender, enabled, getConfig, setConfig, test, diagnose, putProject, upload, submit, jobs, cancelJobs, status, download, remove, flushDeletes, purge, pendingDeletes, CloudError };
+  // AI Referee proxy: forwards a Claude request through the user's own Worker (the API key stays secret on the server).
+  const ai = (body) => call("POST", "/api/ai", { json: body, timeout: 120000 });
+  return { ai, login, register, logout, profile, listMine, adminUsers, adminVideos, adminPin, adminDelete, delVideoId, delClipId, fetchBlob, putClip, canRender, enabled, getConfig, setConfig, test, diagnose, putProject, upload, submit, jobs, cancelJobs, status, download, remove, flushDeletes, purge, pendingDeletes, CloudError };
 })();

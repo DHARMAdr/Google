@@ -123,9 +123,21 @@
         <label for="methodSel">Method</label>
         <select id="methodSel" data-persist="1">
           <option value="hunter" selected>Main-player kills only (new - only YOUR kills, no filler clips)</option>
+          <option value="ai">AI Referee (Claude reads the kill feed - independent, most accurate)</option>
           <option value="smart">Smart Highlight Engine (kills, streaks, big plays)</option>
           <option value="classic">Classic (loudest + most action)</option>
         </select>
+      </div>
+      <div class="wide" id="aiBox" hidden style="border:1px solid var(--line,#444);border-radius:10px;padding:10px">
+        <b>AI Referee</b> - Claude looks at small pictures of the kill feed and only keeps kills where YOU are the killer.
+        <div class="grid" style="margin-top:8px">
+          <div><label for="aiName">Your in-game name (recommended)</label><input id="aiName" type="text" placeholder="e.g. OMAN" autocomplete="off"></div>
+          <div><label for="aiModel">AI model</label><select id="aiModel"><option value="claude-haiku-5-5">Haiku 5.5 - cheap, fast (recommended)</option><option value="claude-sonnet-5-5">Sonnet 5.5 - smarter, costs more</option></select></div>
+          <div><label for="aiPos">Kill feed position</label><select id="aiPos"><option value="tr">Top-right (Valorant)</option><option value="tl">Top-left</option><option value="top">Whole top strip</option></select></div>
+          <div><label for="aiKey">Anthropic API key (optional if your server has it)</label><input id="aiKey" type="password" placeholder="sk-ant-... (stays only in this browser)" autocomplete="off"></div>
+        </div>
+        <div style="margin-top:8px"><button class="ghost" id="aiTest" type="button">Test AI connection</button> <span id="aiMsg" class="hint"></span></div>
+        <div class="hint">Only small kill-feed cut-outs are sent (not the video). A 40-minute video needs roughly 20-60 requests with the small model. Safest: put the key as a secret named ANTHROPIC_API_KEY on your Cloudflare Worker, log in to the server in Profile, and leave the key box empty.</div>
       </div>
       <div class="smart-only wide">
         <label for="profileSel">What kind of video is it?</label>
@@ -517,6 +529,7 @@
 <script src="vendor/mp4box/mp4box.all.min.js"></script>
 <script src="js/referee.js"></script>
 <script src="js/engine.js"></script>
+<script src="js/ai.js"></script>
   <script src="js/autoname.js"></script>
   <script src="js/hunter.js"></script>
 <script src="js/exporter.js"></script>

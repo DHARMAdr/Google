@@ -145,6 +145,8 @@ const Hunter = (function () {
   /* detect(an, params) -> { events, scenes, E }
        params.sens : above 1 accepts weaker evidence (more kills), below 1 is stricter */
   function detect(an, params) {
+    // AI REFEREE (v5.9): when the AI read the kill feed, its answers ARE the events (the Referee still guards against lobby / buy phase).
+    if (an.ai && an.ai.ok) return finish(an, params, an.ai.events.map((e) => Object.assign({}, e)), Object.assign({ candidates: an.ai.events.length, reasons: {} }, an.ai.stats), true);
     if (an.hasTemplate && an.ch.mine) return detectByName(an, params);
     // AUTOMATIC NAME (js/autoname.js): the name was found by itself, so use the rows it matched.
     if (an.auto && an.auto.ok) { const r = finish(an, params, an.auto.events, Object.assign({ candidates: an.auto.events.length, reasons: {} }, an.auto.stats), true); return r; }
