@@ -64,13 +64,29 @@ const AutoName = (function () {
       const v = nccAt(C, Y, W, x, dy, n);
       if (v > best) { best = v; bx = x; by = dy; }
     }
+    bestMatch.x = bx;
     if (best < 0.3) return best;
     for (let dy = Math.max(0, by - 1); dy <= Math.min(maxDy, by + 1); dy++) for (let x = Math.max(0, bx - 2); x <= Math.min(W - C.pw, bx + 2); x++) {
       const v = nccAt(C, Y, W, x, dy, n);
-      if (v > best) best = v;
+      if (v > best) { best = v; bestMatch.x = x; }
     }
     return best;
   }
+  /* WHO IS THE KILLER? (v5.8)  A kill-feed row reads  [KILLER name] [weapon] [VICTIM name].
+     The old code counted your name ANYWHERE in the row, so rows where YOU WERE KILLED looked like your kills (a user report).
+     inkSpan() finds where the writing in a row starts and ends; sidePos() says where a matched piece sits inside that span:
+     0 = far left (killer side), 1 = far right (victim side). Below 0.55 counts as "you are the killer". */
+  function inkSpan(row) {
+    if (row._span) return row._span;
+    const W = row.w, H = row.h, Y = row.patch; let xl = -1, xr = -1;
+    for (let x = 3; x < W - 3; x++) {
+      let e = 0; for (let y = 2; y < H - 2; y++) { const d = Y[y * W + x] - Y[y * W + x - 1]; if (d > 40 || d < -40) e++; }
+      if (e >= 2) { if (xl < 0) xl = x; xr = x; }
+    }
+    return (row._span = xl < 0 ? [0, W] : [xl, Math.max(xr, xl + 1)]);
+  }
+  function sidePos(row, C, x) { const sp = inkSpan(row); return Math.max(0, Math.min(1, (x + C.pw / 2 - sp[0]) / Math.max(1, sp[1] - sp[0]))); }
+  const KILLER_MAX = 0.55;
   function textiness(patch, w, x0, pw, ph) {                // how much ink (sharp changes) a piece has
     let e = 0, mn = 255, mx = 0;
     for (let y = 0; y < ph; y++) for (let x = 1; x < pw; x++) {
@@ -136,7 +152,7 @@ const AutoName = (function () {
     for (const r of seeds) {
       const pw = Math.round(r.h * 4.2), ph = Math.max(6, r.h - 4 - (r.h % 2));
       const pieces = [];
-      for (let x0 = 0; x0 + pw <= r.w; x0 += Math.round(pw / 2)) { const tx = textiness(r.patch.subarray(2 * r.w), r.w, x0, pw, ph); if (tx > 0.02) pieces.push({ x0, tx }); }
+      for (let x0 = 0; x0 + pw <= r.w; x0 += Math.round(pw / 2)) { const tx = textiness(r.patch.subarray(2 * r.w), r.w, x0, pw, ph); if (tx > 0.02 && sidePos(r, { pw }, x0) < KILLER_MAX) pieces.push({ x0, tx }); }
       pieces.sort((a, b) => b.tx - a.tx);
       for (const p of pieces.slice(0, 4)) {
         const raw = new Uint8Array(pw * ph); for (let y = 0; y < ph; y++) raw.set(r.patch.subarray((y + 2) * r.w + p.x0, (y + 2) * r.w + p.x0 + pw), y * pw);
@@ -151,7 +167,7 @@ const AutoName = (function () {
     for (let ci = 0; ci < cands.length; ci++) {
       const C = cands[ci];
       const hits = [];
-      for (const r of compare) if (bestMatch(C, r, 0.95) >= MATCH) hits.push(r.t);
+      for (const r of compare) if (bestMatch(C, r, 0.95) >= MATCH && sidePos(r, C, bestMatch.x) < KILLER_MAX) hits.push(r.t);
       const d = distinct(hits);
       scored.push({ C, n: d.length });
       if (ci % 6 === 0) { say(0.05 + 0.5 * ci / cands.length, "Looking for your name in the kill feed (" + (ci + 1) + "/" + cands.length + ")..."); await yieldUI(); }
@@ -164,7 +180,7 @@ const AutoName = (function () {
     let best = null;
     for (let k = 0; k < top.length; k++) {
       const C = top[k].C, all = [], withGun = [];
-      for (const r of alive) { if (bestMatch(C, r, 0.95) >= MATCH) { all.push(r.t); if (r.gun >= 1) withGun.push(r.t); } }
+      for (const r of alive) { if (bestMatch(C, r, 0.95) >= MATCH && sidePos(r, C, bestMatch.x) < KILLER_MAX) { all.push(r.t); if (r.gun >= 1) withGun.push(r.t); } }
       const nAll = distinct(all).length, nGun = distinct(withGun).length;
       const nTotal = distinct(alive.map((r) => r.t)).length, share = nAll / Math.max(1, distinct(alive.map((r) => r.t)).length);
       const ratio = nAll ? nGun / nAll : 0;
@@ -181,10 +197,12 @@ const AutoName = (function () {
     const events = [];
     for (const r of rows) {
       if (bestMatch(best.C, r, 0.95) < MATCH) continue;
+      const pos = sidePos(r, best.C, bestMatch.x), side = pos < KILLER_MAX ? "killer" : "victim";
+      if (side === "victim") { events.push({ t: r.t, conf: 0.5, kind: "kill", side, pos: +pos.toFixed(2), why: "your name is on the VICTIM side of the row" }); continue; }   // Hunter.finish rejects it (unless the user's feedback flipped the rule)
       if (!r.live) { events.push({ t: r.t, conf: 0.15, kind: "feed", why: "rejected: your name but no firefight around (lobby / buy phase)" }); stats.reasons["no firefight around (lobby / buy phase / menu)"] = (stats.reasons["no firefight around (lobby / buy phase / menu)"] || 0) + 1; continue; }
       if (r.death) { events.push({ t: r.t, conf: 0.2, kind: "feed", why: "rejected: the view switched right after (probably your own death)" }); stats.reasons["your own death (view switch)"] = (stats.reasons["your own death (view switch)"] || 0) + 1; continue; }
       if (r.gun < 1 && best.ratio < 0.9) { events.push({ t: r.t, conf: 0.2, kind: "feed", why: "rejected: your name but no gunfire before" }); stats.reasons["no gunfire before"] = (stats.reasons["no gunfire before"] || 0) + 1; continue; }
-      events.push({ t: r.t, conf: Math.min(1, 0.65 + 0.1 * Math.min(2, r.gun) + 0.15 * best.ratio), kind: "kill", why: "your name was found automatically in the kill feed (" + best.nGun + " matching rows, " + Math.round(best.ratio * 100) + "% after your gunfire)" });
+      events.push({ t: r.t, conf: Math.min(1, 0.65 + 0.1 * Math.min(2, r.gun) + 0.15 * best.ratio), kind: "kill", side, pos: +pos.toFixed(2), why: "your name was found automatically on the KILLER side in the kill feed (" + best.nGun + " matching rows, " + Math.round(best.ratio * 100) + "% after your gunfire)" });
     }
     // remember the piece for the next video of the same game
     try {

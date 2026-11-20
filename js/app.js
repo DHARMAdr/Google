@@ -135,7 +135,7 @@ async function addFiles(files, opts) {
     const v = {
       id: videoSeq++, file, name: file.name, url: "", duration: 0, w: 0, h: 0, thumb: "",
       remote: opts && opts.remote ? { id: opts.remote, complete: true, pending: [], options: null } : null,
-      an: null, anKey: "", det: null, clips: [], inT: 0, outT: 0, deleted: false, noPlay: false, previewUrl: "", codec: "", copyHow: "", cleanup: null
+      an: null, anKey: "", det: null, clips: [], inT: 0, outT: 0, deleted: false, noPlay: false, previewUrl: "", codec: "", copyHow: "", cleanup: null, fb: { bad: [], good: [] }
     };
     // STEP 1: make a stable private copy right now, while the phone still allows reading the picked file.
     // (On Android the permission can disappear later, which made every reader fail in a real report.)
@@ -494,7 +494,8 @@ async function doAnalyse(v) {
       setAState("Finished using SOUND ONLY (pictures could not be read). See the report.", 1, true);
       reportProblem(new Error(failed.length ? failed.map((a) => a.strategy + ": " + a.error).join(" | ") : "Pictures could not be read"), { recovered: "partial", stage: "analyse", attempts: rec.attempts, note: rec.notes.join(" ") });
     } else {
-      setAState("Analysis finished in " + fmt(v.an.seconds) + "." + (failed.length ? " (fixed automatically - " + (rec.frameSource || "backup") + " reader used)" : ""), 1);
+      const tm = rec && rec.timing, tmNote = tm ? " [audio " + Math.round((tm.audioMs || 0) / 1000) + " s, pictures " + (tm.scan ? tm.scan.n + " samples, " + Math.round(((tm.scan.grabMs || 0) + (tm.scan.procMs || 0) + (tm.scan.readMs || 0)) / 1000) + " s busy" + (tm.scan.freezes ? ", " + tm.scan.freezes + " freeze(s)" : "") : "") + "]" : "";
+      setAState("Analysis finished in " + fmt(v.an.seconds) + "." + tmNote + (failed.length ? " (fixed automatically - " + (rec.frameSource || "backup") + " reader used)" : ""), 1);
       // Something failed on the way but the self-healing code got through: tell the user, quietly.
       if (failed.length) reportProblem(new Error(failed[0].error || "Recovered"), { recovered: true, stage: "analyse", attempts: rec.attempts });
     }
@@ -514,15 +515,33 @@ function makeClip(start, end, extra) {
 }
 
 // Turn the analysis into clips (instant - can be repeated when settings change).
+/* LEARN FROM THE USER (v5.8): deleting an automatic clip = "this was NOT my kill" (its moment is skipped next time and the
+   next-best moments show up instead); the "Correct" button = "this WAS my kill" (the clip is kept and never duplicated).
+   If the user's choices say the name sits on the other side of the row, sideRule flips ("killer" is the normal case). */
+function sideRuleFrom(fb) {
+  // Only the "Correct" clicks can flip the rule (a deleted clip may be deleted for any reason, so it proves nothing about the side).
+  let kill = 0, vic = 0;
+  (fb.good || []).forEach((g) => { if (g.side === "killer") kill++; else if (g.side === "victim") vic++; });
+  return vic >= 2 && vic > kill ? "victim" : "killer";
+}
 function applySuggestions(v) {
   if (!v || !v.an) return;
   const P = readParams();
   let found;
   if (P.method === "smart" || P.method === "hunter") {
-    v.det = (P.method === "hunter" ? Hunter : Engine).detect(v.an, { profile: P.profile, sens: P.method === "hunter" ? Math.max(1, P.sens) : P.sens, gap: P.gap });
+    v.fb = v.fb || { bad: [], good: [] };
+    v.det = (P.method === "hunter" ? Hunter : Engine).detect(v.an, { profile: P.profile, sens: P.method === "hunter" ? Math.max(1, P.sens) : P.sens, gap: P.gap, exclude: v.fb.bad.map((b) => b.t), sideRule: sideRuleFrom(v.fb) });
     v.relaxed = 0;      // (an automatic "easier settings" retry was removed: wrong clips are worse than none)
     const maxLen = PLATFORMS[P.platform].max;
     found = Engine.buildClips(v.an, v.det, { maxLen, minLen: Math.min(10, maxLen), fixedLen: P.length || 0, pre: P.pre, post: P.post, count: P.count, snap: P.snap > 0 });
+    // After the user removed clips: if fewer than the wanted number are left, look again with a more open mind (more sensitive) so DIFFERENT moments show up - they are marked REVIEW.
+    if (v.fb.bad.length && found.length < P.count) {
+      try {
+        const det2 = (P.method === "hunter" ? Hunter : Engine).detect(v.an, { profile: P.profile, sens: Math.max(1, P.sens) * 1.6, gap: P.gap, exclude: v.fb.bad.map((b) => b.t), sideRule: sideRuleFrom(v.fb) });
+        const more = Engine.buildClips(v.an, det2, { maxLen, minLen: Math.min(10, maxLen), fixedLen: P.length || 0, pre: P.pre, post: P.post, count: P.count, snap: P.snap > 0 });
+        more.forEach((m) => { if (found.length < P.count && !found.some((f) => Math.min(f.end, m.end) - Math.max(f.start, m.start) > 0)) { m.events = (m.events || []).map((e) => Object.assign({}, e, { tier: "review" })); found.push(m); } });
+      } catch (e) { console.warn("Second look failed:", e); }
+    }
     // NEVER EMPTY: nothing confirmed -> still show the loudest gunfire moments, labelled "Maybe".
     v.fallback = false;
     if (!found.length && v.an.audioOk) { try { found = Engine.fallbackPicks(v.an, { length: P.length || 20, count: P.count, snap: P.snap }); v.fallback = found.length > 0; } catch (e) { console.warn("Fallback picks failed:", e); } }
@@ -531,8 +550,9 @@ function applySuggestions(v) {
     v.det = null;
     found = Engine.classic(v.an, { focus: P.focus, length: P.length || 30, count: P.count, snap: P.snap });
   }
-  // Remove the old automatic clips but keep the ones made or edited by hand.
+  // Remove the old automatic clips but keep the ones made or edited by hand (and the ones the user confirmed).
   v.clips = v.clips.filter((c) => { if (c.auto) { c.out && URL.revokeObjectURL(c.out.url); return false; } return true; });
+  found = found.filter((f) => !v.clips.some((c) => Math.min(c.end, f.end) - Math.max(c.start, f.start) > 0.4 * (f.end - f.start)));   // never duplicate a clip that is already kept
   found.forEach((f) => v.clips.push(makeClip(f.start, f.end, {
     auto: true, score: f.score01, conf: f.conf, reason: f.why, kills: f.kills, rank: f.rank, events: f.events,
     // APPROVED = your name was found on the kill row; REVIEW = clue-only or sound-only guess (check it yourself first).
@@ -713,7 +733,8 @@ function renderClips() {
         <button class="ghost" data-act="preview">Preview</button>
         <button class="ghost" data-act="split">Split at playhead</button>
         <button class="ghost" data-act="dup">Duplicate</button>
-        <button class="danger" data-act="del">Delete clip</button>
+        ${clip.auto ? `<button data-act="good" title="This IS my kill: keep it and learn from it">&#10003; Correct</button>` : ""}
+        <button class="danger" data-act="del" title="Deleting an automatic clip tells the site it was NOT your kill - the next analysis shows different moments">Delete clip</button>
         <button data-act="export">Export clip</button>
       </div>
       <div data-role="result" class="muted small"></div>
@@ -770,6 +791,11 @@ $("clipList").addEventListener("click", (e) => {
     renderClips(); drawTimeline(); renderLib(); renderStats();
   }
   else if (act === "del") deleteClip(clip);
+  else if (act === "good") {       // "Correct": this is my kill - keep it, learn from it
+    cur.fb = cur.fb || { bad: [], good: [] };
+    (clip.events || []).filter((e) => e.kind === "kill").forEach((e) => cur.fb.good.push({ t: e.t, side: e.side || "" }));
+    clip.auto = false; clip.tier = "approved"; clip.reason = "Confirmed by you"; updateClipCard(clip); toast("Thanks - kept, and the site learns from it.");
+  }
   else if (act === "deldl") { URL.revokeObjectURL(clip.out.url); clip.out = null; clip.status = ""; updateClipCard(clip); renderStats(); }
   else if (act === "export") exportOne(clip);
   else if (act === "copyYt") copyText(packFor(clip, cur).yt);
@@ -803,6 +829,11 @@ function splitClip(clip, t) {
 }
 
 function deleteClip(clip) {
+  if (clip.auto && cur) {       // remember: "this was not my kill"
+    cur.fb = cur.fb || { bad: [], good: [] };
+    const evs = (clip.events || []).filter((e) => e.kind === "kill");
+    (evs.length ? evs : [{ t: (clip.start + clip.end) / 2 }]).forEach((e) => cur.fb.bad.push({ t: e.t, side: e.side || "" }));
+  }
   if (clip.out) URL.revokeObjectURL(clip.out.url);
   cur.clips.splice(cur.clips.indexOf(clip), 1);
   renderClips(); drawTimeline(); drawLab(); renderLib(); renderStats();
@@ -1281,6 +1312,7 @@ function snapshotVideo(v) {
     key: v.copyName, offloaded: !!v.offloaded, name: v.name, type: v.origType || v.file.type || "video/mp4", size: sizeOf(v), lastModified: v.origModified || v.file.lastModified,
     duration: v.duration, w: v.w, h: v.h, noPlay: v.noPlay, codec: v.codec, thumb: v.thumb, inT: v.inT, outT: v.outT,
     remote: v.remote ? { id: v.remote.id, complete: !!v.remote.complete, pending: v.remote.pending || [] } : null,
+    fb: v.fb || { bad: [], good: [] },
     clips: v.clips.map((c) => { const o = Object.assign({}, c); delete o.out; delete o.status; return o; }),
     outs: v.clips.filter((c) => c.out && c.out.saved).map((c) => ({ id: c.id, file: c.out.saved, name: c.out.name, size: c.out.size, ext: c.out.ext }))
   };
@@ -1405,7 +1437,7 @@ async function restoreLibrary() {
       const file = r.offloaded ? new File([""], r.name, { type: r.type || "video/mp4" }) : await Compat.openCopy(r.key, { name: r.name, type: r.type, lastModified: r.lastModified });
       if (!r.offloaded && file.size !== r.size) throw new Error("stored copy is incomplete");
       const v = { id: videoSeq++, file, name: r.name, url: "", duration: r.duration, w: r.w, h: r.h, thumb: r.thumb || "", an: null, anKey: "", det: null,
-        clips: r.clips || [], inT: r.inT || 0, outT: r.outT || 0, deleted: false, noPlay: !!r.noPlay, previewUrl: "", codec: r.codec || "", copyHow: "private storage (OPFS)", copyName: r.key,
+        clips: r.clips || [], fb: r.fb || { bad: [], good: [] }, inT: r.inT || 0, outT: r.outT || 0, deleted: false, noPlay: !!r.noPlay, previewUrl: "", codec: r.codec || "", copyHow: "private storage (OPFS)", copyName: r.key,
         origType: r.type, origModified: r.lastModified, cleanup: () => Compat.cleanOld(lib.map((x) => x.copyName).filter(Boolean)) };
       if (r.offloaded) { v.offloaded = true; v.sizeBytes = r.size; v.copyHow = "on your server"; v.url = ""; }
       else if (!v.noPlay) v.url = URL.createObjectURL(file);

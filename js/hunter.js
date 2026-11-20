@@ -109,6 +109,11 @@ const Hunter = (function () {
     events.sort((a, b) => a.t - b.t);
     // REFEREE: a kill must happen inside a real firefight (not in the lobby / buy phase).
     if (typeof Referee !== "undefined") { const r = Referee.judge(an, events); for (const k in r) stats.reasons[k] = (stats.reasons[k] || 0) + r[k]; }
+    // USER FEEDBACK (v5.8): moments of clips the user deleted are excluded, so the next analysis shows DIFFERENT moments.
+    const ex = params.exclude || [];
+    if (ex.length) for (const e of events) if (e.kind === "kill" && ex.some((t) => Math.abs(t - e.t) < 4)) { e.kind = "feed"; e.why = "skipped: you removed a clip here earlier"; stats.reasons["removed by you earlier"] = (stats.reasons["removed by you earlier"] || 0) + 1; }
+    const wantSide = params.sideRule || "killer";
+    for (const e of events) if (e.kind === "kill" && e.side && e.side !== wantSide) { e.kind = "feed"; e.conf = 0.1; e.why = "rejected: your name is on the " + (e.side === "victim" ? "VICTIM side (you were killed)" : "killer side, but your feedback says it should be the other side"); stats.reasons["you were the victim (name on the right side)"] = (stats.reasons["you were the victim (name on the right side)"] || 0) + 1; }
     events.forEach((e) => { e.tier = e.kind !== "kill" ? "rejected" : named ? "approved" : "review"; });
     const kept = [];
     for (const e of events) {
