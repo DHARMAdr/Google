@@ -917,7 +917,7 @@ const Engine = (function () {
     }
 
     // ---- stage 0: the DECODER reader (hardware decoding, no playback, works with the screen off) ----
-    if (!opts.noDecoder && !v.deadSources.decoder && typeof VideoDecoder !== "undefined" && typeof EncodedVideoChunk !== "undefined" && typeof MP4Box !== "undefined") {
+    if (!opts.noDecoder && !store.get("safe", false) && !v.deadSources.decoder && typeof VideoDecoder !== "undefined" && typeof EncodedVideoChunk !== "undefined" && typeof MP4Box !== "undefined") {
       const s0 = performance.now(), Nd = Math.max(1, Math.min(2, parts)), queueD = segs.filter((g) => g.cur < g.b);
       await Promise.all(Array.from({ length: Nd }, (_, k) => (async () => {
         while (queueD.length && !ctl.stopSoft) {

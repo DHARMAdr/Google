@@ -315,3 +315,12 @@ Headless Chrome, synthetic 70 s clip with planted events (kills at 12, 14.5, 17,
 - AI start point (js/ai.js `locatePlayer`): ONE frame to Claude -> {x,y,view,conf}; used as the tracker's prior (third-person games: the character; first-person: crosshair). Only when an AI connection exists; falls back to the centre; note stored in clip.trackNote.
 - Honest limits: motion/flash tracker, no neural character recognition in the browser; first-person games have no visible character.
 - Test: synthetic 10 s video with a moving white square at the right edge, 9:16 turbo export: plain crop -> square visible in 0/7 sampled frames; tracking -> 7/7. Not tested on real gameplay.
+
+## Round 21 - Troubleshoot (Doctor), minimised-app timer, report timing (v5.11.0)
+- NEW js/doctor.js + header "Troubleshoot" button: scans for stale site cache, full storage, safe mode, low memory, export freezes, minimised-during-job time, stuck job, missing browser features, unresolved errors; each has a one-tap fix.
+- Safe mode (`store "safe"`) makes the engine skip the hardware decoder stage (engine.js visualScan).
+- Hidden-time tracker + 90 s no-progress watchdog (toast opens Troubleshoot).
+- Report: section 4a "Where the time went" (names the slowest part) and 4c "Troubleshoot / minimised app".
+- Fixed duplicate element id (Clip report button is now `clipReportBtn`).
+- SW cache clipcutter-v22 (precaches js/doctor.js).
+- Still needs real data: a kill-feed screenshot, a short real-kill clip and a fresh report to tune detection on real footage.

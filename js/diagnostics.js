@@ -40,7 +40,7 @@
 const Diag = (function () {
   "use strict";
 
-  const APP_VERSION = "5.10.0";
+  const APP_VERSION = "5.11.0";
   const START = Date.now();
   const logs = [];            // recent console lines
   const crumbs = [];          // recent clicks and stage changes
@@ -295,6 +295,19 @@ const Diag = (function () {
         L.push("");
       }
     } catch (e) { /* the report must never fail because of this */ }
+    // Minimised-app time, safe mode and the Troubleshoot findings (js/doctor.js).
+    try {
+      const tm = typeof cur !== "undefined" && cur && cur.an && cur.an.recovery && cur.an.recovery.timing;
+      if (tm) {
+        L.push("## 4a. Where the time went (slowness)");
+        const sc = tm.scan || {}, sec = (x) => Math.round((x || 0) / 1000);
+        L.push("- sound: " + sec(tm.audioMs) + " s; pictures: " + (sc.n || 0) + " samples; reading " + sec(sc.readMs) + " s, grabbing " + sec(sc.grabMs) + " s, processing " + sec(sc.procMs) + " s; freezes: " + (sc.freezes || 0));
+        const big = [["sound", tm.audioMs || 0], ["reading", sc.readMs || 0], ["grabbing", sc.grabMs || 0], ["processing", sc.procMs || 0]].sort((x, y) => y[1] - x[1])[0];
+        L.push("- slowest part: " + big[0] + " (" + sec(big[1]) + " s). Reading/grabbing = the video decoder; processing = our detection maths.");
+        L.push("");
+      }
+    } catch (e) { /* ignore */ }
+    try { if (typeof Doctor !== "undefined") { L.push("## 4c. Troubleshoot / minimised app"); L.push(Doctor.summary()); L.push(""); } } catch (e) { /* ignore */ }
     L.push("## 5. Likely cause (automatic guesses)");
     diagnose(entry, probes, ctx).forEach((t) => L.push("- " + t));
     L.push("");

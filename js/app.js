@@ -1168,7 +1168,7 @@ function clipReportText(v) {
   L.push("", "## Summary", "", "- Approved: " + sorted.filter((c) => c.tier === "approved" || !c.auto).length, "- Review required: " + sorted.filter((c) => c.auto && c.tier === "review").length, "- Rejected: " + rej.length);
   return L.join("\n");
 }
-$("reportBtn").addEventListener("click", () => {
+$("clipReportBtn").addEventListener("click", () => {
   if (!cur || !cur.clips.length) { toast("Find highlights first.", true); return; }
   const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([clipReportText(cur)], { type: "text/markdown" })); a.download = slug(cur.name.replace(/\.[^.]+$/, "")) + "_clip-report.md";
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 60000);

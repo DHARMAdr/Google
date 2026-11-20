@@ -46,6 +46,7 @@
     <button class="ghost small" id="installBtn" hidden>Install app</button>
     <button class="ghost small" id="profBtn" title="Log in to your profile (server storage, separate content per person)">Profile</button>
     <button class="ghost small" id="cloudBtn" title="Optional: render on your own server">Cloud <span class="badge" id="cloudDot" hidden>on</span></button>
+    <button class="ghost small" id="docBtn" title="Check the site for problems and fix them with one tap">Troubleshoot</button>
     <button class="ghost small" id="reportBtn" title="Open the last error report, or run a quick system check">Report <span class="badge" id="reportBadge" hidden>0</span></button>
     <button class="ghost small" id="themeBtn" title="Switch light / dark">Theme</button>
   </div>
@@ -368,7 +369,7 @@
     <div class="row" style="margin-top:14px">
       <button id="exportAllBtn">Export all clips</button>
       <button class="ghost" id="joinBtn" disabled title="Export every clip and join them all into ONE video, in the order they happened">One Short with ALL my kills</button>
-      <button class="ghost" id="reportBtn" title="Markdown report: approved clips, review list, rejected moments, captions">Clip report (.md)</button>
+      <button class="ghost" id="clipReportBtn" title="Markdown report: approved clips, review list, rejected moments, captions">Clip report (.md)</button>
       <button class="ghost" id="zipBtn" disabled>Download all (ZIP)</button>
       <button class="ghost" id="packBtn" disabled>Copy upload pack (all)</button>
       <button class="ghost" id="cancelBtn" hidden>Cancel export</button>
@@ -521,6 +522,7 @@
   </div>
 </dialog>
 
+<script src="js/doctor.js"></script>
 <script src="js/diagnostics.js"></script>
 <script src="js/util.js"></script>
 <script src="js/compat.js"></script>
